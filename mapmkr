@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+# Island Dreamforge local runner.
+# Usage: ./mapmkr run | setup | doctor | build | clean
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT/backend"
+FRONTEND_DIR="$ROOT/frontend"
+STATE_DIR="$ROOT/.mapmkr"
+LOG_DIR="$STATE_DIR/logs"
+BACKEND_PORT_DEFAULT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT_DEFAULT="${FRONTEND_PORT:-5173}"
+NPM_REGISTRY="${MAPMKR_NPM_REGISTRY:-https://registry.npmjs.org/}"
+PYTHON_CMD=""
+VENV_PY=""
+BACKEND_PID=""
+FRONTEND_PID=""
+
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+info() { printf '• %s\n' "$*"; }
+warn() { printf '⚠ %s\n' "$*"; }
+fail() { printf '✖ %s\n' "$*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+file_hash() {
+  local file="$1"
+  "$PYTHON_CMD" - "$file" <<'PY'
+import hashlib, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+print(hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "missing")
+PY
+}
+
+python_ok() {
+  local exe="$1"
+  [[ -n "$exe" && -x "$exe" ]] || return 1
+  "$exe" - <<'PY' >/dev/null 2>&1
+import sys
+# Prefer a version with prebuilt binary wheels for numpy/pillow on macOS/Windows/Linux.
+# Python 3.14 is intentionally skipped unless explicitly requested via MAPMKR_PYTHON.
+raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)
+PY
+}
+
+python_version() {
+  "$1" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+PY
+}
+
+find_python() {
+  local candidates=()
+  if [[ -n "${MAPMKR_PYTHON:-}" ]]; then
+    candidates+=("$MAPMKR_PYTHON")
+  else
+    # Prefer stable Python versions with reliable binary wheels. This avoids Python 3.14
+    # trying to build packages from source on Apple Silicon.
+    candidates+=(
+      "/opt/homebrew/bin/python3.12"
+      "/usr/local/bin/python3.12"
+      "python3.12"
+      "/opt/homebrew/bin/python3.13"
+      "/usr/local/bin/python3.13"
+      "python3.13"
+      "/opt/homebrew/bin/python3.11"
+      "/usr/local/bin/python3.11"
+      "python3.11"
+      "/opt/homebrew/bin/python3.10"
+      "/usr/local/bin/python3.10"
+      "python3.10"
+      "python3"
+      "python"
+    )
+  fi
+
+  local cand resolved
+  for cand in "${candidates[@]}"; do
+    if [[ "$cand" == */* ]]; then
+      resolved="$cand"
+    elif have "$cand"; then
+      resolved="$(command -v "$cand")"
+    else
+      continue
+    fi
+    if python_ok "$resolved"; then
+      PYTHON_CMD="$resolved"
+      return 0
+    fi
+  done
+
+  if [[ -n "${MAPMKR_PYTHON:-}" ]]; then
+    fail "MAPMKR_PYTHON points to an unsupported Python. Use Python 3.10 through 3.13, ideally Python 3.12."
+  fi
+
+  # Friendly macOS/Homebrew fallback. It only runs when no compatible Python exists.
+  if [[ "$(uname -s 2>/dev/null || true)" == "Darwin" && -x "/opt/homebrew/bin/brew" ]]; then
+    warn "No compatible Python 3.10-3.13 was found. Installing Python 3.12 with Homebrew..."
+    /opt/homebrew/bin/brew install python@3.12
+    if python_ok "/opt/homebrew/bin/python3.12"; then
+      PYTHON_CMD="/opt/homebrew/bin/python3.12"
+      return 0
+    fi
+  elif [[ "$(uname -s 2>/dev/null || true)" == "Darwin" && -x "/usr/local/bin/brew" ]]; then
+    warn "No compatible Python 3.10-3.13 was found. Installing Python 3.12 with Homebrew..."
+    /usr/local/bin/brew install python@3.12
+    if python_ok "/usr/local/bin/python3.12"; then
+      PYTHON_CMD="/usr/local/bin/python3.12"
+      return 0
+    fi
+  fi
+
+  fail "Python 3.10-3.13 is required. Install Python 3.12, then run ./mapmkr run again."
+}
+
+check_node() {
+  have node || fail "Node.js is required for the 3D frontend. Install Node 18+ and run ./mapmkr run again."
+  have npm || fail "npm is required, but it was not found with Node.js. Reinstall Node.js with npm included."
+  node - <<'JS' || fail "Node 18+ is required for this app. Please upgrade Node.js."
+const major = Number(process.versions.node.split('.')[0]);
+process.exit(major >= 18 ? 0 : 1);
+JS
+}
+
+venv_python_path() {
+  if [[ -x "$BACKEND_DIR/.venv/bin/python" ]]; then
+    VENV_PY="$BACKEND_DIR/.venv/bin/python"
+  elif [[ -x "$BACKEND_DIR/.venv/Scripts/python.exe" ]]; then
+    VENV_PY="$BACKEND_DIR/.venv/Scripts/python.exe"
+  else
+    VENV_PY=""
+  fi
+}
+
+venv_usable() {
+  [[ -n "$VENV_PY" ]] || return 1
+  python_ok "$VENV_PY" || return 1
+  local desired actual
+  desired="$($PYTHON_CMD - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+  actual="$($VENV_PY - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+  [[ "$desired" == "$actual" ]]
+}
+
+ensure_backend() {
+  find_python
+  info "Using Python $(python_version "$PYTHON_CMD") at $PYTHON_CMD"
+  venv_python_path
+  if ! venv_usable; then
+    if [[ -d "$BACKEND_DIR/.venv" ]]; then
+      warn "Recreating backend virtual environment with a compatible Python..."
+      rm -rf "$BACKEND_DIR/.venv"
+    else
+      info "Creating backend Python virtual environment..."
+    fi
+    "$PYTHON_CMD" -m venv "$BACKEND_DIR/.venv" || fail "Could not create Python virtual environment."
+    venv_python_path
+  fi
+
+  [[ -n "$VENV_PY" ]] || fail "Could not find virtual environment Python after creating it."
+
+  local req_hash state_file old_hash
+  req_hash="$(file_hash "$BACKEND_DIR/requirements.txt")"
+  state_file="$STATE_DIR/backend_requirements.sha256"
+  old_hash="$(cat "$state_file" 2>/dev/null || true)"
+
+  if [[ "$req_hash" != "$old_hash" ]]; then
+    info "Installing/updating backend dependencies..."
+    "$VENV_PY" -m pip install --upgrade --disable-pip-version-check pip wheel setuptools >/dev/null
+    "$VENV_PY" -m pip install --prefer-binary --disable-pip-version-check -r "$BACKEND_DIR/requirements.txt"
+    printf '%s' "$req_hash" > "$state_file"
+  else
+    info "Backend dependencies are already installed."
+  fi
+
+  if ! (cd "$BACKEND_DIR" && "$VENV_PY" - <<'PY'
+import fastapi, PIL, numpy, trimesh
+from app.main import app
+print("backend import ok")
+PY
+  ) >/dev/null 2>&1; then
+    warn "Backend import check failed; reinstalling backend dependencies..."
+    "$VENV_PY" -m pip install --prefer-binary --disable-pip-version-check -r "$BACKEND_DIR/requirements.txt"
+    (cd "$BACKEND_DIR" && "$VENV_PY" - <<'PY'
+import fastapi, PIL, numpy, trimesh
+from app.main import app
+print("backend import ok")
+PY
+    ) >/dev/null
+  fi
+}
+
+lockfile_has_private_registry() {
+  [[ -f "$FRONTEND_DIR/package-lock.json" ]] || return 1
+  grep -qE 'internal\.api\.openai\.org|applied-caas|artifactory' "$FRONTEND_DIR/package-lock.json"
+}
+
+ensure_frontend() {
+  check_node
+  if lockfile_has_private_registry; then
+    warn "Removing a stale package-lock.json that points to a private registry. It will be regenerated from npmjs.org."
+    rm -f "$FRONTEND_DIR/package-lock.json"
+  fi
+
+  # Project-local npm registry beats any broken global registry/proxy setting.
+  cat > "$FRONTEND_DIR/.npmrc" <<EOF
+registry=$NPM_REGISTRY
+audit=false
+fund=false
+EOF
+
+  local pkg_hash lock_hash state_file current_hash old_hash
+  pkg_hash="$(file_hash "$FRONTEND_DIR/package.json")"
+  lock_hash="$(file_hash "$FRONTEND_DIR/package-lock.json")"
+  current_hash="$pkg_hash:$lock_hash:$NPM_REGISTRY"
+  state_file="$STATE_DIR/frontend_packages.sha256"
+  old_hash="$(cat "$state_file" 2>/dev/null || true)"
+
+  if [[ ! -d "$FRONTEND_DIR/node_modules" || "$current_hash" != "$old_hash" ]]; then
+    info "Installing/updating frontend dependencies from $NPM_REGISTRY ..."
+    (cd "$FRONTEND_DIR" && npm --registry "$NPM_REGISTRY" install)
+    lock_hash="$(file_hash "$FRONTEND_DIR/package-lock.json")"
+    printf '%s' "$pkg_hash:$lock_hash:$NPM_REGISTRY" > "$state_file"
+  else
+    info "Frontend dependencies are already installed."
+  fi
+}
+
+setup_all() {
+  bold "Checking Island Dreamforge dependencies"
+  ensure_backend
+  ensure_frontend
+  bold "Setup complete"
+}
+
+port_free() {
+  local port="$1"
+  "$PYTHON_CMD" - "$port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(0.25)
+try:
+    result = s.connect_ex(("127.0.0.1", port))
+finally:
+    s.close()
+raise SystemExit(0 if result != 0 else 1)
+PY
+}
+
+find_free_port() {
+  local start="$1" p
+  for ((p=start; p<start+50; p++)); do
+    if port_free "$p"; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_for_url() {
+  local url="$1" name="$2" tries=90
+  "$PYTHON_CMD" - "$url" "$name" "$tries" <<'PY'
+import sys, time, urllib.request
+url, name, tries = sys.argv[1], sys.argv[2], int(sys.argv[3])
+for _ in range(tries):
+    try:
+        with urllib.request.urlopen(url, timeout=1) as r:
+            if 200 <= r.status < 500:
+                print(f"{name} is ready")
+                raise SystemExit(0)
+    except Exception:
+        time.sleep(0.5)
+print(f"Timed out waiting for {name}: {url}", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
+cleanup() {
+  local code=$?
+  trap - EXIT INT TERM
+  if [[ -n "$FRONTEND_PID" ]] && kill -0 "$FRONTEND_PID" >/dev/null 2>&1; then
+    kill "$FRONTEND_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$BACKEND_PID" ]] && kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    kill "$BACKEND_PID" >/dev/null 2>&1 || true
+  fi
+  exit "$code"
+}
+
+run_app() {
+  setup_all
+  local backend_port frontend_port backend_url frontend_url
+  backend_port="$(find_free_port "$BACKEND_PORT_DEFAULT")" || fail "No free backend port found near $BACKEND_PORT_DEFAULT."
+  frontend_port="$(find_free_port "$FRONTEND_PORT_DEFAULT")" || fail "No free frontend port found near $FRONTEND_PORT_DEFAULT."
+  backend_url="http://127.0.0.1:$backend_port"
+  frontend_url="http://127.0.0.1:$frontend_port"
+
+  : > "$LOG_DIR/backend.log"
+  : > "$LOG_DIR/frontend.log"
+
+  trap cleanup EXIT INT TERM
+
+  info "Starting backend on $backend_url ..."
+  (cd "$BACKEND_DIR" && exec "$VENV_PY" -m uvicorn app.main:app --host 127.0.0.1 --port "$backend_port") > "$LOG_DIR/backend.log" 2>&1 &
+  BACKEND_PID=$!
+  wait_for_url "$backend_url/health" "backend" || { tail -n 80 "$LOG_DIR/backend.log"; fail "Backend failed to start."; }
+
+  info "Starting frontend on $frontend_url ..."
+  (cd "$FRONTEND_DIR" && export VITE_API_URL="$backend_url" && exec npm run dev -- --host 127.0.0.1 --port "$frontend_port" --strictPort) > "$LOG_DIR/frontend.log" 2>&1 &
+  FRONTEND_PID=$!
+  wait_for_url "$frontend_url" "frontend" || { tail -n 80 "$LOG_DIR/frontend.log"; fail "Frontend failed to start."; }
+
+  bold "Island Dreamforge is running"
+  printf '\nOpen: %s\nBackend: %s\n\nLogs:\n  %s\n  %s\n\nPress Ctrl+C to stop both servers.\n' "$frontend_url" "$backend_url" "$LOG_DIR/frontend.log" "$LOG_DIR/backend.log"
+
+  while true; do
+    if ! kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+      tail -n 80 "$LOG_DIR/backend.log" || true
+      fail "Backend stopped unexpectedly."
+    fi
+    if ! kill -0 "$FRONTEND_PID" >/dev/null 2>&1; then
+      tail -n 80 "$LOG_DIR/frontend.log" || true
+      fail "Frontend stopped unexpectedly."
+    fi
+    sleep 2
+  done
+}
+
+build_all() {
+  setup_all
+  info "Building frontend production bundle..."
+  (cd "$FRONTEND_DIR" && npm run build)
+  info "Checking backend import..."
+  (cd "$BACKEND_DIR" && "$VENV_PY" - <<'PY'
+from app.main import app
+print('backend import ok')
+PY
+  )
+  bold "Build/check complete"
+}
+
+doctor() {
+  setup_all
+  info "Python: $($VENV_PY --version)"
+  info "Node: $(node --version)"
+  info "npm: $(npm --version)"
+  info "Checking frontend build..."
+  (cd "$FRONTEND_DIR" && npm run build)
+  info "Checking backend health import..."
+  (cd "$BACKEND_DIR" && "$VENV_PY" - <<'PY'
+from app.main import health
+assert health()['status'] == 'ok'
+print('backend health ok')
+PY
+  )
+  bold "Doctor passed"
+}
+
+clean() {
+  rm -rf "$BACKEND_DIR/.venv" "$FRONTEND_DIR/node_modules" "$FRONTEND_DIR/dist" "$STATE_DIR"
+  bold "Cleaned installed dependencies and local build files."
+}
+
+case "${1:-run}" in
+  run) run_app ;;
+  setup) setup_all ;;
+  doctor|check) doctor ;;
+  build) build_all ;;
+  clean) clean ;;
+  help|-h|--help)
+    cat <<'HELP'
+Island Dreamforge local commands:
+  ./mapmkr run      Install missing app dependencies, start backend + frontend.
+  ./mapmkr setup    Install/update Python and npm dependencies only.
+  ./mapmkr doctor   Install dependencies, build frontend, check backend imports.
+  ./mapmkr build    Build frontend and check backend imports.
+  ./mapmkr clean    Remove local dependency folders and build output.
+
+Optional ports:
+  BACKEND_PORT=8000 FRONTEND_PORT=5173 ./mapmkr run
+
+Optional overrides:
+  MAPMKR_PYTHON=/opt/homebrew/bin/python3.12 ./mapmkr run
+  MAPMKR_NPM_REGISTRY=https://registry.npmjs.org/ ./mapmkr run
+HELP
+    ;;
+  *) fail "Unknown command: ${1:-}. Try ./mapmkr help" ;;
+esac

@@ -1,0 +1,29 @@
+{
+  "pokemon_resort_soft_cliffs": {
+    "maxHeightM": 500,
+    "smoothingSigma": 2.4,
+    "roundPeaks": 0.58,
+    "roundPeakRadius": 8,
+    "cliffStrength": 0.22,
+    "detailPreserve": 0.18,
+    "description": "Smooth coast, rounded mountain caps, steep tropical green cliff walls."
+  },
+  "volcanic_island": {
+    "maxHeightM": 900,
+    "smoothingSigma": 1.4,
+    "roundPeaks": 0.35,
+    "roundPeakRadius": 5,
+    "cliffStrength": 0.62,
+    "detailPreserve": 0.35,
+    "description": "Higher, sharper volcanic slopes with strong cliff breaks."
+  },
+  "gentle_resort_island": {
+    "maxHeightM": 220,
+    "smoothingSigma": 4.2,
+    "roundPeaks": 0.75,
+    "roundPeakRadius": 12,
+    "cliffStrength": 0.05,
+    "detailPreserve": 0.08,
+    "description": "Low friendly island with soft hills and broad beaches."
+  }
+}
