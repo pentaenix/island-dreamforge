@@ -1,0 +1,92 @@
+{
+  "lighting": {
+    "sunDirection": [0.48, 0.82, 0.38],
+    "sunColor": "#fff9ee",
+    "sunIntensity": 3.85,
+    "ambientColor": "#8eb8d8",
+    "ambientIntensity": 0.11,
+    "hemisphereSky": "#a8d8ff",
+    "hemisphereGround": "#1a4a22",
+    "hemisphereIntensity": 0.48,
+    "fillColor": "#c8e4ff",
+    "fillIntensity": 0.1,
+    "rimColor": "#ffe8c8",
+    "rimIntensity": 0.14,
+    "exposure": 1.28,
+    "envMapIntensity": 1.05
+  },
+  "fog": {
+    "enabled": true,
+    "color": "#9ecae8",
+    "density": 0.000024
+  },
+  "water": {
+    "enabled": true,
+    "waterColor": "#0a2d52",
+    "sunColor": "#fffef5",
+    "sunDirection": [0.48, 0.82, 0.38],
+    "distortionScale": 4.6,
+    "alpha": 1.0,
+    "textureWidth": 1024,
+    "textureHeight": 1024,
+    "waveSpeed": 0.52,
+    "clipBias": 0.0,
+    "planeScale": 2.2
+  },
+  "terrainTextures": {
+    "tilingM": 28,
+    "paths": {
+      "grass": {
+        "color": "/island-assets/textures/green/grass_03_color_1k.png",
+        "normal": "/island-assets/textures/green/grass_03_normal_gl_1k.png"
+      },
+      "trees": {
+        "color": "/island-assets/textures/green/grass_03_color_1k.png",
+        "normal": "/island-assets/textures/green/grass_03_normal_gl_1k.png"
+      },
+      "sand": {
+        "color": "/island-assets/textures/sand/sand_04_color_1k.png",
+        "normal": "/island-assets/textures/sand/sand_04_normal_gl_1k.png"
+      },
+      "wet_sand": {
+        "color": "/island-assets/textures/sand/sand_04_color_1k.png",
+        "normal": "/island-assets/textures/sand/sand_04_normal_gl_1k.png"
+      },
+      "rock": {
+        "color": "/island-assets/textures/cliff/cliff_rocks_01_color_1k.png",
+        "normal": "/island-assets/textures/cliff/cliff_rocks_01_normal_gl_1k.png"
+      },
+      "gravel": {
+        "color": "/island-assets/textures/ground/ground_05_baseColor_1k.png",
+        "normal": "/island-assets/textures/ground/ground_05_normal_gl_1k.png"
+      }
+    }
+  },
+  "vegetation": {
+    "enabled": true,
+    "density": 0.82,
+    "maxCount": 3600,
+    "spacing": 3,
+    "minHeightNorm": 0.02,
+    "maxSlopeDeg": 48,
+    "minHeightM": 2,
+    "scaleMin": 3.5,
+    "scaleMax": 14,
+    "seed": 42,
+    "colorTint": "#6aad52",
+    "accentTint": "#4a8c3a",
+    "carpetLayers": 2
+  },
+  "terrainRules": {
+    "rockSlopeStart": 50,
+    "rockSlopeBlend": 14,
+    "forestSlopeFade": 48,
+    "treeDensity": 0.88,
+    "treePixelSize": 4,
+    "gravelAmount": 0.12,
+    "sandHeightM": 14,
+    "wetSandWidthM": 5,
+    "forestHeightMin": 0.04,
+    "forestHeightMax": 0.95
+  }
+}

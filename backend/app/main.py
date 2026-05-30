@@ -20,7 +20,8 @@ from .image_utils import (
     resize_to_match,
 )
 from .mesh_export import export_mesh_bytes, height_to_mesh
-from .terrain import bake_water_layer, generate_heightmap_from_colors, parse_samples, quantize_dominant_colors
+from .layers import analyze_overlay_layer
+from .terrain import bake_water_layer, generate_heightmap_from_colors, parse_samples, preprocess_map_for_height, quantize_dominant_colors
 
 app = FastAPI(title="Island Dreamforge API", version="1.0.0")
 
@@ -56,6 +57,30 @@ async def analyze_colors(
         image = read_upload_image(await map_image.read(), "RGB")
         colors = quantize_dominant_colors(image, count=count)
         return {"colors": colors, "width": image.width, "height": image.height}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+
+@app.post("/api/preprocess-map")
+async def preprocess_map(
+    map_image: UploadFile = File(...),
+    samples: str = Form("[]"),
+    options: str = Form("{}"),
+) -> Dict[str, Any]:
+    """Preview the cleanup pass: color averaging, line ignoring, palette reduction, paper-noise smoothing."""
+    opts = _json_field(options, {})
+    try:
+        image = read_upload_image(await map_image.read(), "RGBA")
+        sample_list = parse_samples(_json_field(samples, []))
+        cleaned = preprocess_map_for_height(image, sample_list, opts)
+        return {
+            "cleanedPreview": image_to_data_url(cleaned),
+            "width": cleaned.width,
+            "height": cleaned.height,
+            "options": opts,
+        }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -98,10 +123,17 @@ async def create_heightmap(
                 headers={"Content-Disposition": "attachment; filename=island_heightmap_stage1.zip"},
             )
 
+        h_min = float(height.min()) if height.size else 0.0
+        h_max = float(height.max()) if height.size else 0.0
+        warning = None
+        if (h_max - h_min) < max(1.0, max_height_m * 0.004):
+            warning = "The generated height map is almost flat. Add more height colors or use Suggest colors + fill levels before generating."
         return {
             "maxHeightM": max_height_m,
             "heightmap16": image_to_data_url(height16),
             "preview8": image_to_data_url(preview),
+            "heightStats": {"minM": round(h_min, 4), "maxM": round(h_max, 4), "rangeM": round(h_max - h_min, 4)},
+            "warning": warning,
             "recipe": recipe,
         }
     except Exception as exc:
@@ -159,6 +191,31 @@ async def bake_water(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/analyze-layer")
+async def analyze_layer(
+    layer_image: UploadFile = File(...),
+    heightmap: Optional[UploadFile] = File(None),
+    kind: str = Form("marker"),
+    options: str = Form("{}"),
+) -> Dict[str, Any]:
+    """Analyze a user-painted overlay layer into water/structure/marker/texture features.
+
+    The output is intentionally game-pipeline friendly: normalized 2D map position,
+    world-space X/Y/Z, footprint, orientation, and per-kind metadata.
+    """
+    opts = _json_field(options, {})
+    try:
+        layer_img = read_upload_image(await layer_image.read(), "RGBA")
+        height_img = None
+        if heightmap is not None:
+            height_img = read_upload_image(await heightmap.read(), "I;16")
+        result = analyze_overlay_layer(layer_img, kind, opts, height_img)
+        preview_img = result.pop("preview")
+        return {**result, "preview": image_to_data_url(preview_img)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/export-mesh")
 async def export_mesh(
     heightmap: UploadFile = File(...),
@@ -189,6 +246,7 @@ async def export_mesh(
 async def export_project(
     heightmap: UploadFile = File(...),
     texture: Optional[UploadFile] = File(None),
+    normal_map: Optional[UploadFile] = File(None),
     water_mask: Optional[UploadFile] = File(None),
     recipe: str = Form("{}"),
     options: str = Form("{}"),
@@ -199,6 +257,7 @@ async def export_project(
     try:
         height_bytes = await heightmap.read()
         tex_bytes = await texture.read() if texture else None
+        normal_bytes = await normal_map.read() if normal_map else None
         water_bytes = await water_mask.read() if water_mask else None
         h_img = read_upload_image(height_bytes, "I;16")
         height = image_to_height_m(h_img, max_height_m)
@@ -212,6 +271,8 @@ async def export_project(
             zf.writestr("maps/final_heightmap_16bit.png", height_bytes)
             if tex_bytes:
                 zf.writestr("maps/painted_texture.png", tex_bytes)
+            if normal_bytes:
+                zf.writestr("maps/normal_map.png", normal_bytes)
             if water_bytes:
                 zf.writestr("maps/water_mask.png", water_bytes)
             zf.writestr("models/island_terrain.glb", glb)

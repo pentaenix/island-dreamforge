@@ -1,0 +1,29 @@
+# Dependencies and build output (never index)
+frontend/node_modules/
+backend/.venv/
+frontend/dist/
+.mapmkr/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs and local env
+*.log
+.env
+.env.*
+
+# OS and archives
+.DS_Store
+*.zip
+
+# Binary assets — use docs/ASSETS.md paths, not file reads
+examples/
+frontend/public/examples/
+frontend/src/assets/textures/
+
+# Lockfiles — use package.json / requirements.txt instead
+frontend/package-lock.json

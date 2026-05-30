@@ -1,7 +1,25 @@
+# Python
 backend/.venv/
-frontend/node_modules/
-frontend/dist/
-.mapmkr/
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+
+# Local runner
+.mapmkr/
+
+# Env and secrets
+.env
+.env.*
+
+# Logs and OS
+*.log
 .DS_Store
+
+# Archives (release zips, not source)
+*.zip
