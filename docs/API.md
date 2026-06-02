@@ -16,7 +16,7 @@ All POST bodies use `multipart/form-data` unless noted. JSON fields are **string
 |--------|------|------------|---------|
 | POST | `/api/analyze-colors` | `map_image`, `count` | Dominant colors, width, height |
 | POST | `/api/preprocess-map` | `map_image`, `samples`, `options` | `cleanedPreview` data URL |
-| POST | `/api/heightmap` | `map_image`, `samples`, `options`, optional `cleaned_map` | Height previews, 16-bit PNG stages, metadata |
+| POST | `/api/heightmap` | `map_image`, `samples`, `options`, optional `cleaned_map` | Height previews, 16-bit PNG stages, metadata; ZIP mode includes `manifest.json` |
 
 **Domain logic:** `backend/app/terrain.py` (`generate_heightmap_from_colors`, `preprocess_map_for_height`, `quantize_dominant_colors`).
 
@@ -24,7 +24,7 @@ All POST bodies use `multipart/form-data` unless noted. JSON fields are **string
 
 | Method | Path | Key fields | Returns |
 |--------|------|------------|---------|
-| POST | `/api/bake-water` | height + water layer images, `mode`, `options` | Baked height preview / arrays |
+| POST | `/api/bake-water` | height + water layer images, `mode`, `options` | Baked height preview / arrays; ZIP mode includes `manifest.json` |
 
 **Domain logic:** `terrain.bake_water_layer` (non-destructive modes documented in README).
 
@@ -41,9 +41,12 @@ All POST bodies use `multipart/form-data` unless noted. JSON fields are **string
 | Method | Path | Key fields | Returns |
 |--------|------|------------|---------|
 | POST | `/api/export-mesh` | height data, `format`, world dimensions | Binary mesh (`glb`, `obj`, `stl`, `ply`) |
-| POST | `/api/export-project` | full project payload | ZIP archive |
+| POST | `/api/export-project` | full project payload | ZIP archive with `manifest.json` |
+| POST | `/api/island-derived-maps` | `heightmap`, `options` | Island mask, shoreline, shore distance, ocean disc, water depth, material previews |
+| POST | `/api/export-web-island` | `heightmap`, `options` | Web portal ZIP (`manifest.json`, GLB scene, masks, material/depth textures, metadata) |
+| POST | `/api/export-game-island` | `heightmap`, `options` | Game ZIP (`manifest.json`, quantized maps, chunked terrain/seafloor binaries, preview GLB) |
 
-**Domain logic:** `backend/app/mesh_export.py`, assembly in `main.py`.
+**Domain logic:** `backend/app/island_maps.py`, `backend/app/mesh_export.py`, `backend/app/island_export.py`; route handlers in `main.py` only parse form data and stream responses.
 
 ## Shared image helpers
 

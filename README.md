@@ -37,6 +37,7 @@ The runner checks for Python 3.10-3.13 and Node 18+, creates the backend virtual
 - Water baking is non-destructive by design. The default water mode is **Visual water only**, and indent modes only make a shallow bed instead of carving holes to the bottom.
 - Refreshing the page restores your current project from local IndexedDB autosave.
 - The bottom-right **Reset project** button clears the local autosave and starts from zero.
+- **Heights tab → Island world scale** sets land width/depth in meters (presets up to ~30 km), terrain mesh polygon density, and fixed-meter spacing/size for trees and future paths/buildings.
 - Structures and markers snap to the final smoothed terrain in the 3D viewport.
 - The 3D view hides sea-level terrain pixels so the island rises out of water instead of looking like a rectangular PNG.
 - The water shader uses transparency, reflection/sparkle, depth darkening, shoreline foam, and horizon fade for a better default ocean without heavy frame-rate cost.

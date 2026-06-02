@@ -29,3 +29,16 @@ export async function postForm(path, form, asBlob = false) {
   }
   return asBlob ? await res.blob() : await res.json();
 }
+
+export async function postJson(path, body) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Request failed: ${res.status}`);
+  }
+  return await res.json();
+}

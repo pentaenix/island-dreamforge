@@ -20,6 +20,7 @@ Then open **only** the task path below. Use [`docs/API.md`](docs/API.md) for HTT
 | **Procedural textures / materials / 3D look** | `frontend/src/TerrainViewport.jsx` (grep `MATERIALS`, shader, forest) | `terrain.py` |
 | **Texture step UI** | `frontend/src/App.jsx` (grep textures/step 2) | Backend |
 | **Water bake / sea level** | `backend/app/terrain.py` (`bake_water_layer`), README water section | Full viewport |
+| **Derived island maps / bathymetry / materials** | `backend/app/island_maps.py`, `docs/API.md` | Full `terrain.py` unless height generation changes |
 | **Layer / structure / marker analysis** | `backend/app/layers.py`, `docs/API.md` | `terrain.py` unless height-linked |
 | **Mesh export formats** | `backend/app/mesh_export.py`, `docs/API.md` | Frontend |
 | **Export / ZIP / download UX** | `frontend/src/App.jsx` (grep export), `backend/app/main.py` (export routes only) | `terrain.py` |
@@ -29,7 +30,7 @@ Then open **only** the task path below. Use [`docs/API.md`](docs/API.md) for HTT
 
 ## Architecture snapshot
 
-- **Backend:** FastAPI on port 8000 — height pipeline (`terrain.py`), overlays (`layers.py`), meshes (`mesh_export.py`).
+- **Backend:** FastAPI on port 8000 — height pipeline (`terrain.py`), derived maps (`island_maps.py`), overlays (`layers.py`), meshes (`mesh_export.py`).
 - **Frontend:** React + Vite + Three.js — `App.jsx` owns the 4-step wizard and IndexedDB autosave; `TerrainViewport.jsx` owns the 3D scene.
 - **Run:** `./mapmkr run` from repo root.
 

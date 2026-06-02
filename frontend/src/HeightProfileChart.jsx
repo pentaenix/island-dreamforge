@@ -11,6 +11,9 @@
  *
  * The tuneOpts effect re-runs the smooth computation with a 30 ms debounce so that
  * dragging sliders gives near-real-time feedback without stalling the UI thread.
+ *
+ * Handle drags only move the colored dot until release; then the cyan profile and
+ * palette height update together (no heavy smooth pass while dragging).
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -23,6 +26,11 @@ import {
   PROFILE_Y_HEADROOM_M,
   smoothDraftField,
 } from './heightProfile.js';
+import {
+  designMetersFromWorld,
+  getIslandHorizonScale,
+  getWorldMaxHeightM,
+} from './worldSettings.js';
 import { Segmented } from './studioUi.jsx';
 
 const PAD = { l: 54, r: 18, t: 20, b: 34 };
@@ -109,6 +117,7 @@ export default function HeightProfileChart({
   const tuneOptsRef = useRef(null);
   const plotMetricsRef = useRef(null);
   const dragHexRef = useRef(null);
+  const dragIndexRef = useRef(null);
   const dragLiveHeightRef = useRef(null);
   const smoothTimerRef = useRef(null);
 
@@ -121,12 +130,14 @@ export default function HeightProfileChart({
   const [baseLoading, setBaseLoading] = useState(false);
   const [hoverIndex, setHoverIndex] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
-  const [dragLiveHeight, setDragLiveHeight] = useState(null);
+  const [dragLiveDesignM, setDragLiveDesignM] = useState(null);
 
   const maxHeightM = Number(options.maxHeightM || 500);
+  const elevationScale = getIslandHorizonScale(worldSettings);
+  const worldMaxHeightM = getWorldMaxHeightM(maxHeightM, worldSettings);
   // Magnify only (≥1): chart Y range stays tied to max height + headroom, never squashed wider.
   const profileScale = Math.max(1, Number(worldSettings.verticalExaggeration ?? 1));
-  const { yMin, yMax, yTop } = profileYRange(maxHeightM, seaLevelM, profileScale);
+  const { yMin, yMax, yTop } = profileYRange(worldMaxHeightM, seaLevelM, profileScale);
   const spanM = profileSpanM(axis, worldSettings, mapSizePx);
   const axisLabel = axis === 'width' ? 'Width profile' : 'Depth profile';
   const canDrag = !!onUpdateSample && samples.length > 0;
@@ -214,25 +225,34 @@ export default function HeightProfileChart({
     scheduleSmooth();
   }, [sampleHeightKey, matchOpts, samples, scheduleSmooth]);
 
-  const previewPoints = useMemo(
-    () => (previewField ? extractOrthographicProfile(previewField, axis) : []),
-    [previewField, axis],
-  );
-  const generatedPoints = useMemo(
-    () => (heightPreviewUrl && generatedField ? extractOrthographicProfile(generatedField, axis) : []),
-    [generatedField, axis, heightPreviewUrl],
+  const scaleProfilePoints = useCallback(
+    (pts) => pts.map((p) => ({ ...p, meters: p.meters * elevationScale })),
+    [elevationScale],
   );
 
-  // Live drag height overrides the sample's stored height for the dragged handle.
+  const previewPoints = useMemo(
+    () => scaleProfilePoints(previewField ? extractOrthographicProfile(previewField, axis) : []),
+    [previewField, axis, scaleProfilePoints],
+  );
+  const generatedPoints = useMemo(
+    () => scaleProfilePoints(heightPreviewUrl && generatedField ? extractOrthographicProfile(generatedField, axis) : []),
+    [generatedField, axis, heightPreviewUrl, scaleProfilePoints],
+  );
+
+  // Handle Y positions in world meters (chart axis); design meters stay in samples / palette.
   const sampleBands = useMemo(
-    () => samples.map((s, index) => ({
-      index,
-      hex: s.hex,
-      height: dragHexRef.current && s.hex.toLowerCase() === dragHexRef.current.toLowerCase() && dragLiveHeight != null
-        ? dragLiveHeight
-        : (Number(s.height) || 0),
-    })),
-    [samples, dragLiveHeight],
+    () => samples.map((s, index) => {
+      const designM = dragIndex === index && dragLiveDesignM != null
+        ? dragLiveDesignM
+        : (Number(s.height) || 0);
+      return {
+        index,
+        hex: s.hex,
+        designM,
+        height: designM * elevationScale,
+      };
+    }),
+    [samples, dragIndex, dragLiveDesignM, elevationScale],
   );
 
   const canvasW = large ? 1280 : 700;
@@ -300,7 +320,7 @@ export default function HeightProfileChart({
     }
 
     // ── Height ceiling (always on scale: 0 … max + headroom) ──
-    const ceilY = toY(maxHeightM);
+    const ceilY = toY(worldMaxHeightM);
     ctx.strokeStyle = 'rgba(255,175,90,0.5)';
     ctx.lineWidth = 1.25;
     ctx.setLineDash([4, 4]);
@@ -309,9 +329,9 @@ export default function HeightProfileChart({
     ctx.fillStyle = 'rgba(255,195,120,0.8)';
     ctx.font = '10px Inter, system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText(`Max ${Math.round(maxHeightM)}m`, PAD.l + 4, ceilY - 4);
+    ctx.fillText(`Max ${Math.round(worldMaxHeightM)}m`, PAD.l + 4, ceilY - 4);
 
-    if (yTop > maxHeightM + 2) {
+    if (yTop > worldMaxHeightM + 2) {
       ctx.fillStyle = 'rgba(106,150,170,0.65)';
       ctx.textAlign = 'right';
       ctx.fillText(`+${PROFILE_Y_HEADROOM_M}m headroom`, PAD.l + plotW - 4, PAD.t + 12);
@@ -390,9 +410,9 @@ export default function HeightProfileChart({
     ctx.textAlign = 'center'; ctx.fillText(axisLabel, PAD.l + plotW / 2, h - 9);
   }, [
     previewPoints, generatedPoints, sampleBands,
-    maxHeightM, seaLevelM, spanM, axisLabel, mapUrl,
+    worldMaxHeightM, seaLevelM, spanM, axisLabel, mapUrl,
     hasPreview, hasGenerated, baseLoading, canDrag,
-    activeIndex, profileScale, yMin, yMax, yTop,
+    activeIndex, profileScale, yMin, yMax, yTop, elevationScale, sampleBands,
   ]);
 
   // ── Pointer handling ─────────────────────────────────────────────────────
@@ -418,15 +438,15 @@ export default function HeightProfileChart({
     return bestD <= HANDLE_HIT_PX ? best : null;
   }, []);
 
+  /** Move handle only — cyan profile + palette update on release (avoids lag). */
   const previewDragAtY = useCallback((py) => {
     const m = plotMetricsRef.current;
-    if (!m || !dragHexRef.current) return;
-    const height = Math.max(0, Math.min(maxHeightM, Math.round(m.metersFromY(py))));
-    dragLiveHeightRef.current = height;
-    setDragLiveHeight(height);
-    const idx = samplesRef.current.findIndex((s) => s.hex.toLowerCase() === dragHexRef.current.toLowerCase());
-    if (idx >= 0) setDragIndex(idx);
-  }, [maxHeightM]);
+    if (!m || dragIndexRef.current == null) return;
+    const worldH = Math.max(0, Math.min(worldMaxHeightM, m.metersFromY(py)));
+    const designH = Math.max(0, Math.min(maxHeightM, Math.round(designMetersFromWorld(worldH, worldSettings))));
+    dragLiveHeightRef.current = designH;
+    setDragLiveDesignM(designH);
+  }, [worldMaxHeightM, maxHeightM, worldSettings]);
 
   const commitDrag = useCallback(() => {
     const hex = dragHexRef.current;
@@ -447,7 +467,9 @@ export default function HeightProfileChart({
     const idx = findBand(y, x);
     if (idx == null) return;
     dragHexRef.current = samplesRef.current[idx]?.hex ?? null;
+    dragIndexRef.current = idx;
     setDragIndex(idx);
+    setDragLiveDesignM(Number(samplesRef.current[idx]?.height) || 0);
     onSelectSample?.(dragHexRef.current);
     previewDragAtY(y);
     canvasRef.current?.setPointerCapture(ev.pointerId);
@@ -464,9 +486,10 @@ export default function HeightProfileChart({
     if (!dragHexRef.current) return;
     commitDrag();
     dragHexRef.current = null;
+    dragIndexRef.current = null;
     dragLiveHeightRef.current = null;
     setDragIndex(null);
-    setDragLiveHeight(null);
+    setDragLiveDesignM(null);
     if (ev?.pointerId != null && canvasRef.current?.hasPointerCapture(ev.pointerId)) {
       canvasRef.current.releasePointerCapture(ev.pointerId);
     }
@@ -483,7 +506,7 @@ export default function HeightProfileChart({
   const statusLabel = baseLoading
     ? 'Loading map…'
     : dragIndex != null
-      ? `${dragLiveHeight != null ? `${Math.round(dragLiveHeight)} m` : '…'} — release to apply`
+      ? `${dragLiveDesignM != null ? `${Math.round(dragLiveDesignM)} m` : '…'} — release to update profile & palette`
       : hasGenerated && hasPreview
         ? 'Cyan = smooth preview · Green = last generated'
         : hasPreview ? 'Cyan smooth preview' : 'Waiting for samples';

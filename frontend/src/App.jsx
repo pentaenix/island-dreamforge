@@ -1,8 +1,24 @@
 import React, { useMemo, useRef, useState } from 'react';
 import TerrainViewport, { MATERIALS } from './TerrainViewport.jsx';
 import HeightsStudio from './HeightsStudio.jsx';
+import TexturesStudio from './TexturesStudio.jsx';
+import { DEFAULT_TEXTURE_SETTINGS } from './textureSettings.js';
+import ExportProfilePanel from './ExportProfilePanel.jsx';
+import WaterSettingsPanel from './WaterSettingsPanel.jsx';
+import WaterDiscPreview from './WaterDiscPreview.jsx';
+import { buildWaterDiscPreview } from './waterDiscPreviewClient.js';
 import { Slider } from './studioUi.jsx';
 import { API_URL, dataUrlToBlob, downloadBlob, postForm } from './api.js';
+import {
+  DEFAULT_WORLD_SETTINGS,
+  buildMeshExportOptions,
+  getDerivedDepthM,
+  getIslandHorizonScale,
+  getMetersPerPixel,
+  getOceanDiscRadiusM,
+  normalizeWorldSettings,
+} from './worldSettings.js';
+import { buildHeightGenFingerprint } from './heightGenFingerprint.js';
 
 const waterOnlyStarter = [
   { hex: '#b7d3dc', height: 0, tolerance: 0, weight: 1, role: 'water' },
@@ -28,11 +44,6 @@ function fileToDataUrl(file) {
   });
 }
 
-async function urlToFile(url, name, type = 'image/png') {
-  const blob = await fetch(url).then(r => r.blob());
-  return new File([blob], name, { type });
-}
-
 function hexFromRgb(r, g, b) {
   return '#' + [r, g, b].map(v => Number(v).toString(16).padStart(2, '0')).join('');
 }
@@ -45,13 +56,6 @@ function rgbFromHex(hex) {
 
 
 const PROJECT_STORE = 'island-dreamforge-autosave-v7';
-
-const DEFAULT_WORLD_SETTINGS = {
-  widthM: 1480,
-  depthM: 1086,
-  lockAspect: true,
-  verticalExaggeration: 1.0,
-};
 
 const DEFAULT_OPTIONS = {
   maxHeightM: 500,
@@ -96,27 +100,35 @@ const DEFAULT_OPTIONS = {
 /** 3D ocean uses Three.js Water with fixed tuning — no viewport sliders. */
 const DEFAULT_WATER_SETTINGS = { enabled: true, seaLevelM: 0 };
 
-const DEFAULT_TEXTURE_SETTINGS = {
-  textureSize: 2048,
-  pixelSize: 2,
-  fuzziness: 0.18,
-  normalStrength: 0.82,
-  materialContrast: 0.38,
-  variation: 0.22,
-  treeDensity: 0.88,
-  treeCountMax: 3600,
-  treeSpacing: 3,
-  treeSeed: 42,
-  treeMinHeightM: 2,
-  treePixelSize: 4,
-  forestSlopeFade: 48,
-  rockSlopeStart: 50,
-  rockSlopeBlend: 14,
-  rockFeatureScale: 0.55,
-  gravelAmount: 0.12,
-  sandHeightM: 14,
-  wetSandWidthM: 5,
-  preservePaintedEdits: true,
+const DEFAULT_EXPORT_SETTINGS = {
+  oceanRadiusAuto: true,
+  oceanRadiusM: 1700,
+  maxOceanDepthM: 180,
+  shoreShelfWidthM: 24,
+  shallowShelfM: 24,
+  midWaterDistanceM: 70,
+  midShelfM: 70,
+  deepWaterDistanceM: 150,
+  deepStartM: 150,
+  depthCurveExponent: 1.25,
+  bathymetrySmoothPx: 1,
+  bathymetryRelaxPasses: 0,
+  coastalVariationStrength: 0.15,
+  reefNoiseStrength: 0.08,
+  foamWidthM: 12,
+  foamStrength: 0.2,
+  waterColorSteps: 6,
+  waterNoiseStrength: 0.1,
+  waterNoiseScaleM: 85,
+  coastlineSkirtDepthM: 40,
+  seafloorNoiseM: 6,
+  circularFalloffSoftnessM: 200,
+  previewDetail: 'preview_high',
+  webDetail: 'web_export_high',
+  gameDetail: 'game_export_medium',
+  chunkSize: 16,
+  showSeafloorPreview: false,
+  previewSphereRadiusM: 220,
 };
 
 const MATERIAL_TOOLTIPS = {
@@ -290,64 +302,6 @@ function LayerCard({ layer, active, onSelect, onChange, onFile, onAnalyze, onExp
 }
 
 
-function TexturePreviewTile({ id, label, settings }) {
-  const seed = id.length * 17;
-  const px = Math.max(2, Number(settings.pixelSize || 4));
-  const fuzzy = Number(settings.fuzziness || 0.5);
-  const style = {
-    '--px': `${px}px`,
-    '--fuzz': fuzzy,
-  };
-  return <div className={`material-tile material-${id}`} style={style} title={`${label} preview`}>
-    <div className="tile-noise" style={{ backgroundPosition: `${seed}px ${seed * 2}px` }} />
-    <span>{label}</span>
-  </div>;
-}
-
-function TextureStudio({ settings, setSettings, onOpen3D, canPreview }) {
-  const update = patch => setSettings({ ...settings, ...patch });
-  return <section className="texture-stage">
-    <aside className="panel texture-controls">
-      <h2>2 · Procedural textures</h2>
-      <p className="muted">Generate the island’s art pass before water and final 3D editing. These settings control fuzzy pixel texture, trees, rocks, gravel, sand, normals, and material transitions.</p>
-      <div className="material-board">
-        {MATERIALS.map(m => <TexturePreviewTile key={m.id} id={m.id} label={m.label} settings={settings} />)}
-      </div>
-      <div className="actions">
-        <button className="primary" onClick={onOpen3D} disabled={!canPreview}>Open 3D preview with these textures</button>
-      </div>
-      {!canPreview && <p className="small muted">Generate the height map first, then the 3D preview can render these materials.</p>}
-    </aside>
-
-    <main className="panel texture-rules">
-      <h3>Texture quality and style</h3>
-      <Slider label="Texture resolution" value={settings.textureSize} min={512} max={2048} step={256} suffix="px" onChange={v => update({ textureSize: v })} />
-      <Slider label="Pixel size" value={settings.pixelSize} min={1} max={18} step={1} suffix="px" onChange={v => update({ pixelSize: v })} />
-      <Slider label="Fuzziness" value={settings.fuzziness} min={0} max={1} step={0.01} onChange={v => update({ fuzziness: v })} />
-      <Slider label="Normal/bump strength" value={settings.normalStrength} min={0} max={1.4} step={0.01} onChange={v => update({ normalStrength: v })} />
-      <Slider label="Color variation" value={settings.variation} min={0} max={1} step={0.01} onChange={v => update({ variation: v })} />
-      <Slider label="Material contrast" value={settings.materialContrast} min={0} max={1} step={0.01} onChange={v => update({ materialContrast: v })} />
-
-      <h3>Terrain-to-material rules</h3>
-      <Slider label="Rock starts at steepness" value={settings.rockSlopeStart} min={8} max={80} step={1} suffix="°" onChange={v => update({ rockSlopeStart: v })} />
-      <Slider label="Rock blend width" value={settings.rockSlopeBlend} min={2} max={40} step={1} suffix="°" onChange={v => update({ rockSlopeBlend: v })} />
-      <Slider label="Rock feature strength" value={settings.rockFeatureScale} min={0} max={1.4} step={0.01} onChange={v => update({ rockFeatureScale: v })} />
-      <h3>Forest clumps (3D)</h3>
-      <Slider label="Spawn density" value={settings.treeDensity} min={0} max={1} step={0.01} onChange={v => update({ treeDensity: v })} />
-      <Slider label="Max tree count" value={settings.treeCountMax} min={100} max={4000} step={50} onChange={v => update({ treeCountMax: v })} />
-      <Slider label="Grid spacing" value={settings.treeSpacing} min={3} max={24} step={1} suffix="cells" onChange={v => update({ treeSpacing: v })} />
-      <Slider label="Min terrain height" value={settings.treeMinHeightM} min={0} max={80} step={1} suffix="m" onChange={v => update({ treeMinHeightM: v })} />
-      <Slider label="Max slope" value={settings.forestSlopeFade} min={8} max={80} step={1} suffix="°" onChange={v => update({ forestSlopeFade: v })} />
-      <Slider label="Random seed" value={settings.treeSeed} min={1} max={9999} step={1} onChange={v => update({ treeSeed: v })} />
-      <Slider label="Canopy texture pixel size" value={settings.treePixelSize} min={2} max={24} step={1} suffix="px" onChange={v => update({ treePixelSize: v })} />
-      <Slider label="Gravel in transition zones" value={settings.gravelAmount} min={0} max={1} step={0.01} onChange={v => update({ gravelAmount: v })} />
-      <Slider label="Sand height band" value={settings.sandHeightM} min={1} max={120} step={1} suffix="m" onChange={v => update({ sandHeightM: v })} />
-      <Slider label="Wet sand width" value={settings.wetSandWidthM} min={0} max={40} step={1} suffix="m" onChange={v => update({ wetSandWidthM: v })} />
-      <label className="checkline"><input type="checkbox" checked={!!settings.preservePaintedEdits} onChange={e => update({ preservePaintedEdits: e.target.checked })} /> Preserve hand-painted edits when regenerating</label>
-    </main>
-  </section>;
-}
-
 export default function App() {
   const viewportRef = useRef(null);
   const [stage, setStage] = useState(1);
@@ -362,6 +316,7 @@ export default function App() {
   const [cleanedPreview, setCleanedPreview] = useState('');
   const [heightmap16, setHeightmap16] = useState('');
   const [heightPreview, setHeightPreview] = useState('');
+  const [heightGenFingerprint, setHeightGenFingerprint] = useState('');
   const [bakedHeightmap16, setBakedHeightmap16] = useState('');
   const [bakedPreview, setBakedPreview] = useState('');
   const [waterMask, setWaterMask] = useState('');
@@ -376,6 +331,9 @@ export default function App() {
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
   const [waterSettings, setWaterSettings] = useState(DEFAULT_WATER_SETTINGS);
   const [textureSettings, setTextureSettings] = useState(DEFAULT_TEXTURE_SETTINGS);
+  const [exportSettings, setExportSettings] = useState(DEFAULT_EXPORT_SETTINGS);
+  const [derivedMaps, setDerivedMaps] = useState(null);
+  const [waterDiscPreview, setWaterDiscPreview] = useState(null);
   const [similarRadius, setSimilarRadius] = useState(18);
   const [analyzeCount, setAnalyzeCount] = useState(12);
   const [worldSettings, setWorldSettings] = useState(DEFAULT_WORLD_SETTINGS);
@@ -384,11 +342,85 @@ export default function App() {
   const finalPreview = bakedPreview || heightPreview;
   const finalHeight = bakedHeightmap16 || heightmap16;
   const activeLayer = layers.find(l => l.id === activeLayerId) || layers[0] || null;
-  const derivedDepthM = (() => {
-    if (worldSettings.lockAspect && mapSizePx.width && mapSizePx.height) return Math.round(worldSettings.widthM * mapSizePx.height / mapSizePx.width);
-    return Number(worldSettings.depthM || 0);
-  })();
-  const metersPerPixel = mapSizePx.width ? (Number(worldSettings.widthM || 0) / Math.max(1, mapSizePx.width)) : 0;
+  const derivedDepthM = getDerivedDepthM(worldSettings, mapSizePx);
+  const metersPerPixel = getMetersPerPixel(worldSettings, mapSizePx);
+
+  const currentHeightFingerprint = useMemo(
+    () => buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius }),
+    [mapUrl, samples, options, similarRadius],
+  );
+  const heightOutOfDate = !!heightPreview && currentHeightFingerprint !== heightGenFingerprint;
+  const heightGenerating = typeof busy === 'string' && busy.toLowerCase().includes('height');
+  const canGenerateHeightmap = !!mapFile && samples.length > 0
+    && Math.max(...samples.map((s) => Number(s.height || 0))) > Number(options.seaLevelM || 0) + 0.5;
+
+  const islandExportOptions = useMemo(() => ({
+    ...exportSettings,
+    maxHeightM: Number(options.maxHeightM || 500),
+    seaLevelM: Number(options.seaLevelM ?? waterSettings.seaLevelM ?? 0),
+    widthM: Number(worldSettings.widthM || 1480),
+    depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
+    verticalScale: Number(worldSettings.verticalExaggeration || 1) * getIslandHorizonScale(worldSettings),
+    islandHeightScale: getIslandHorizonScale(worldSettings),
+    oceanRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    world: {
+      widthM: Number(worldSettings.widthM || 1480),
+      depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
+      maxHeightM: Number(options.maxHeightM || 500),
+      verticalExaggeration: Number(worldSettings.verticalExaggeration || 1),
+      seaLevelM: Number(options.seaLevelM ?? waterSettings.seaLevelM ?? 0),
+      terrainMeshResolution: Number(worldSettings.terrainMeshResolution || 384),
+      featureSpacingM: Number(worldSettings.featureSpacingM ?? 22),
+      featureScale: Number(worldSettings.featureScale ?? 1),
+    },
+    ocean: {
+      radiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+      maxDepthM: Number(exportSettings.maxOceanDepthM || 220),
+      shoreShelfWidthM: Number(exportSettings.shoreShelfWidthM || exportSettings.shallowShelfM || 24),
+      shallowShelfM: Number(exportSettings.shallowShelfM || exportSettings.shoreShelfWidthM || 24),
+      midWaterDistanceM: Number(exportSettings.midWaterDistanceM || exportSettings.midShelfM || 70),
+      midShelfM: Number(exportSettings.midShelfM || exportSettings.midWaterDistanceM || 70),
+      deepWaterDistanceM: Number(exportSettings.deepWaterDistanceM || 150),
+      deepStartM: Number(exportSettings.deepStartM || exportSettings.deepWaterDistanceM || 150),
+      depthCurveExponent: Number(exportSettings.depthCurveExponent || 1.25),
+      bathymetrySmoothPx: Number(exportSettings.bathymetrySmoothPx ?? 1),
+      bathymetryRelaxPasses: Number(exportSettings.bathymetryRelaxPasses ?? 0),
+      coastalVariationStrength: Number(exportSettings.coastalVariationStrength ?? 0.18),
+      reefNoiseStrength: Number(exportSettings.reefNoiseStrength ?? 0.05),
+      foamWidthM: Number(exportSettings.foamWidthM || 10),
+      foamStrength: Number(exportSettings.foamStrength ?? 0.22),
+      coastlineSkirtDepthM: Number(exportSettings.coastlineSkirtDepthM || 40),
+    },
+    detail: {
+      preview: exportSettings.previewDetail,
+      web: exportSettings.webDetail,
+      game: exportSettings.gameDetail,
+      chunkSize: Number(exportSettings.chunkSize || 16),
+    },
+  }), [exportSettings, options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM]);
+  const waterPreviewOptions = useMemo(() => ({
+    ...exportSettings,
+    oceanRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    previewSphereRadiusM: Number(exportSettings.previewSphereRadiusM || 120),
+  }), [exportSettings, worldSettings, mapSizePx]);
+
+  const waterPreviewKey = useMemo(() => JSON.stringify(waterPreviewOptions), [waterPreviewOptions]);
+
+  const derivedPreviewKey = useMemo(() => JSON.stringify({
+    maxHeightM: Number(options.maxHeightM || 500),
+    seaLevelM: Number(options.seaLevelM ?? waterSettings.seaLevelM ?? 0),
+    widthM: Number(worldSettings.widthM || 1480),
+    depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
+    oceanRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    islandHeightScale: getIslandHorizonScale(worldSettings),
+    shallowShelfM: Number(exportSettings.shallowShelfM || exportSettings.shoreShelfWidthM || 24),
+    midShelfM: Number(exportSettings.midShelfM || exportSettings.midWaterDistanceM || 70),
+    deepStartM: Number(exportSettings.deepStartM || exportSettings.deepWaterDistanceM || 150),
+    bathymetrySmoothPx: Number(exportSettings.bathymetrySmoothPx ?? 1),
+    coastalVariationStrength: Number(exportSettings.coastalVariationStrength ?? 0.18),
+    reefNoiseStrength: Number(exportSettings.reefNoiseStrength ?? 0.05),
+    foamWidthM: Number(exportSettings.foamWidthM || 10),
+  }), [options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, exportSettings, mapSizePx]);
 
   const recipe = useMemo(() => ({
     app: 'Island Dreamforge',
@@ -398,9 +430,10 @@ export default function App() {
     stage1Options: options,
     waterSettings,
     textureSettings,
+    exportSettings,
     worldSettings,
     layers: layers.map(({ file, url, ...l }) => l),
-  }), [samples, options, waterSettings, textureSettings, worldSettings, layers]);
+  }), [samples, options, waterSettings, textureSettings, exportSettings, worldSettings, layers]);
 
 
   React.useEffect(() => {
@@ -410,7 +443,11 @@ export default function App() {
         const saved = await idbGet(PROJECT_STORE);
         if (!alive) return;
         if (saved?.version >= 6) {
-          setStage(saved.stage || 1);
+          {
+            let restoredStage = Number(saved.stage) || 1;
+            if (restoredStage >= 4) restoredStage += 1;
+            setStage(restoredStage);
+          }
           setMapUrl(saved.mapUrl || '');
           setMapFile(saved.mapUrl ? fileFromDataUrl(saved.mapUrl, saved.mapFileName || 'restored_map.png') : null);
           setSamples(saved.samples?.length ? saved.samples : waterOnlyStarter);
@@ -426,10 +463,10 @@ export default function App() {
           setOptions({ ...DEFAULT_OPTIONS, ...(saved.options || {}) });
           setWaterSettings({ ...DEFAULT_WATER_SETTINGS, ...(saved.waterSettings || {}) });
           setTextureSettings({ ...DEFAULT_TEXTURE_SETTINGS, ...(saved.textureSettings || {}) });
+          setExportSettings({ ...DEFAULT_EXPORT_SETTINGS, ...(saved.exportSettings || {}) });
+          setDerivedMaps(saved.derivedMaps || null);
           {
-            const restoredWorld = { ...DEFAULT_WORLD_SETTINGS, ...(saved.worldSettings || {}) };
-            restoredWorld.verticalExaggeration = Math.max(1, Number(restoredWorld.verticalExaggeration) || 1);
-            setWorldSettings(restoredWorld);
+            setWorldSettings(normalizeWorldSettings(saved.worldSettings || {}));
           }
           setMapSizePx(saved.mapSizePx || { width: 0, height: 0 });
           setTool(saved.tool || 'move');
@@ -479,6 +516,8 @@ export default function App() {
         options,
         waterSettings,
         textureSettings,
+        exportSettings,
+        derivedMaps,
         worldSettings,
         mapSizePx,
         tool,
@@ -487,7 +526,7 @@ export default function App() {
       }).catch(e => console.warn('Autosave failed', e));
     }, 600);
     return () => clearTimeout(timer);
-  }, [stage, mapUrl, samples, picked, newHeight, dominant, cleanedPreview, heightmap16, heightPreview, bakedHeightmap16, bakedPreview, waterMask, layers, activeLayerId, options, waterSettings, textureSettings, worldSettings, mapSizePx, tool, selectedMaterial, brush, mapFile]);
+  }, [stage, mapUrl, samples, picked, newHeight, dominant, cleanedPreview, heightmap16, heightPreview, bakedHeightmap16, bakedPreview, waterMask, layers, activeLayerId, options, waterSettings, textureSettings, exportSettings, derivedMaps, worldSettings, mapSizePx, tool, selectedMaterial, brush, mapFile]);
 
   async function handleFile(file, setterFile, setterUrl) {
     if (!file) return;
@@ -521,7 +560,8 @@ export default function App() {
         if (onlyStarter) return [{ hex: waterHex, height: 0, tolerance: 0, weight: 1, role: 'water' }];
         return prev;
       });
-      setHeightmap16(''); setHeightPreview(''); setBakedHeightmap16(''); setBakedPreview(''); setWaterMask('');
+      setHeightmap16(''); setHeightPreview(''); setHeightGenFingerprint('');
+      setBakedHeightmap16(''); setBakedPreview(''); setWaterMask('');
       setCleanedPreview('');
     } catch (e) { setError(e.message || String(e)); }
     finally { setBusy(''); }
@@ -533,7 +573,8 @@ export default function App() {
     setMapFile(null); setMapUrl(''); setMapVersion(v => v + 1);
     setSamples(waterOnlyStarter); setPicked('#b7d3dc'); setNewHeight(0);
     setDominant([]); setCleanedPreview('');
-    setHeightmap16(''); setHeightPreview(''); setBakedHeightmap16(''); setBakedPreview(''); setWaterMask('');
+    setHeightmap16(''); setHeightPreview(''); setHeightGenFingerprint('');
+    setBakedHeightmap16(''); setBakedPreview(''); setWaterMask('');
     setLayers([]); setActiveLayerId(null);
     setOptions({ ...DEFAULT_OPTIONS });
     setWaterSettings({ ...DEFAULT_WATER_SETTINGS });
@@ -546,24 +587,6 @@ export default function App() {
     setAdvancedOpen(false);
     setTool('move'); setSelectedMaterial('trees');
     setError(''); setBusy('');
-  }
-
-  async function loadExample() {
-    setBusy('Loading included island layers...'); setError('');
-    try {
-      const mf = await urlToFile('/examples/base_map.png', 'base_map.png');
-      await handleBaseMap(mf);
-      const wf = await urlToFile('/examples/water_layer.png', 'water_layer.png');
-      const sf = await urlToFile('/examples/structure_layer.png', 'structure_layer.png');
-      const waterUrl = await fileToDataUrl(wf);
-      const structureUrl = await fileToDataUrl(sf);
-      const water = { ...newLayer('water'), file: wf, url: waterUrl, name: 'Example water overlay' };
-      const structure = { ...newLayer('structure'), file: sf, url: structureUrl, name: 'Example structures', shape: 'box', objectHeightM: 8 };
-      setLayers([water, structure, newLayer('marker'), newLayer('texture')]);
-      setActiveLayerId(water.id);
-      setSamples(islandColorLadder);
-    } catch (e) { setError(e.message); }
-    finally { setBusy(''); }
   }
 
   function addHeightPoint(hex = picked) {
@@ -639,6 +662,7 @@ export default function App() {
         const data = await postForm('/api/heightmap', form);
         setHeightmap16(data.heightmap16);
         setHeightPreview(data.preview8);
+        setHeightGenFingerprint(buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius }));
         setBakedHeightmap16(''); setBakedPreview('');
         if (data.warning) setError(data.warning);
       }
@@ -707,7 +731,7 @@ export default function App() {
         setBakedPreview(data.preview8);
         setWaterMask(data.waterMask);
         setWaterSettings(prev => ({ ...prev, seaLevelM: options.seaLevelM || 0 }));
-        setStage(3);
+        setStage(4);
       }
     } catch (e) { setError(e.message); }
     finally { setBusy(''); }
@@ -730,7 +754,7 @@ export default function App() {
       form.append('heightmap', editHeightBlob || dataUrlToBlob(finalHeight), 'edited_heightmap.png');
       if (textureBlob) form.append('texture', textureBlob, 'painted_texture.png');
       form.append('fmt', fmt);
-      form.append('options', JSON.stringify({ maxHeightM: options.maxHeightM, widthM: Number(worldSettings.widthM || 1480), depthM: Number(derivedDepthM || worldSettings.depthM || 1086), verticalScale: Number(worldSettings.verticalExaggeration || 1), meshResolution: 512, addSkirt: true }));
+      form.append('options', JSON.stringify(buildMeshExportOptions(worldSettings, derivedDepthM, { maxHeightM: options.maxHeightM })));
       const blob = await postForm('/api/export-mesh', form, true);
       downloadBlob(blob, `island_terrain.${fmt}`);
     } catch (e) { setError(e.message); }
@@ -750,9 +774,89 @@ export default function App() {
       if (normalBlob) form.append('normal_map', normalBlob, 'normal_map.png');
       if (waterMask) form.append('water_mask', dataUrlToBlob(waterMask), 'water_mask.png');
       form.append('recipe', JSON.stringify(recipe));
-      form.append('options', JSON.stringify({ maxHeightM: options.maxHeightM, widthM: Number(worldSettings.widthM || 1480), depthM: Number(derivedDepthM || worldSettings.depthM || 1086), verticalScale: Number(worldSettings.verticalExaggeration || 1), meshResolution: 512, addSkirt: true }));
+      form.append('options', JSON.stringify(buildMeshExportOptions(worldSettings, derivedDepthM, { maxHeightM: options.maxHeightM })));
       const blob = await postForm('/api/export-project', form, true);
       downloadBlob(blob, 'island_dreamforge_project.zip');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(''); }
+  }
+
+  async function currentHeightBlobForExport(filename = 'final_heightmap.png') {
+    const editHeightBlob = await viewportRef.current?.getHeightmapBlob();
+    const source = editHeightBlob || dataUrlToBlob(finalHeight);
+    if (!source) return null;
+    return { blob: source, filename };
+  }
+
+  function refreshWaterDiscPreview({ silent = false } = {}) {
+    if (!silent) setBusy('Rendering water disc preview...');
+    if (!silent) setError('');
+    try {
+      setWaterDiscPreview(buildWaterDiscPreview(waterPreviewOptions));
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (!silent) setError(msg);
+      else console.warn('Water disc preview failed', e);
+    } finally {
+      if (!silent) setBusy('');
+    }
+  }
+
+  async function refreshDerivedMaps({ silent = false } = {}) {
+    if (!finalHeight) return setError('Generate a heightmap first.');
+    if (!silent) setBusy('Generating derived island maps...');
+    if (!silent) setError('');
+    try {
+      const current = await currentHeightBlobForExport('derived_heightmap.png');
+      const form = new FormData();
+      form.append('heightmap', current.blob, current.filename);
+      form.append('options', JSON.stringify(islandExportOptions));
+      const data = await postForm('/api/island-derived-maps', form);
+      setDerivedMaps(data);
+    } catch (e) {
+      if (!silent) setError(e.message);
+      else console.warn('Derived map preview refresh failed', e);
+    }
+    finally { if (!silent) setBusy(''); }
+  }
+
+  React.useEffect(() => {
+    if (stage !== 3) return;
+    refreshWaterDiscPreview({ silent: true });
+  }, [stage, waterPreviewKey]);
+
+  React.useEffect(() => {
+    if (stage !== 5 || !finalHeight) return;
+    const timer = setTimeout(() => {
+      refreshDerivedMaps({ silent: true });
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [stage, finalHeight, derivedPreviewKey]);
+
+  async function exportWebIsland() {
+    if (!finalHeight) return setError('Generate a heightmap first.');
+    setBusy('Exporting web portal package...'); setError('');
+    try {
+      const current = await currentHeightBlobForExport('web_export_heightmap.png');
+      const form = new FormData();
+      form.append('heightmap', current.blob, current.filename);
+      form.append('options', JSON.stringify(islandExportOptions));
+      const blob = await postForm('/api/export-web-island', form, true);
+      downloadBlob(blob, 'web_export.zip');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(''); }
+  }
+
+  async function exportGameIsland() {
+    if (!finalHeight) return setError('Generate a heightmap first.');
+    setBusy('Exporting game package...'); setError('');
+    try {
+      const current = await currentHeightBlobForExport('game_export_heightmap.png');
+      const form = new FormData();
+      form.append('heightmap', current.blob, current.filename);
+      form.append('options', JSON.stringify(islandExportOptions));
+      const blob = await postForm('/api/export-game-island', form, true);
+      downloadBlob(blob, 'game_export.zip');
     } catch (e) { setError(e.message); }
     finally { setBusy(''); }
   }
@@ -776,9 +880,9 @@ export default function App() {
       <nav className="stage-tabs">
         <button className={stage === 1 ? 'active' : ''} onClick={() => setStage(1)}>1 · Heights</button>
         <button className={stage === 2 ? 'active' : ''} onClick={() => setStage(2)}>2 · Textures</button>
-        <button className={stage === 3 ? 'active' : ''} onClick={() => setStage(3)}>3 · Water & Layers</button>
-        <button className={stage === 4 ? 'active' : ''} onClick={() => setStage(4)}>4 · 3D / Export</button>
-        <button onClick={loadExample}>Load included island layers</button>
+        <button className={stage === 3 ? 'active' : ''} onClick={() => setStage(3)}>3 · Water</button>
+        <button className={stage === 4 ? 'active' : ''} onClick={() => setStage(4)}>4 · Layers</button>
+        <button className={stage === 5 ? 'active' : ''} onClick={() => setStage(5)}>5 · 3D / Export</button>
       </nav>
 
       {busy && <div className="banner busy">{busy}</div>}
@@ -805,6 +909,10 @@ export default function App() {
           mapSizePx={mapSizePx}
           metersPerPixel={metersPerPixel}
           heightPreview={heightPreview}
+          heightOutOfDate={heightOutOfDate}
+          heightGenerating={heightGenerating}
+          canGenerateHeightmap={canGenerateHeightmap}
+          onEnsureHeightmap={() => generateHeightmap('json')}
           dominant={dominant}
           cleanedPreview={cleanedPreview}
           analyzeCount={analyzeCount}
@@ -822,11 +930,45 @@ export default function App() {
         />
       )}
 
-      {stage === 2 && <TextureStudio settings={textureSettings} setSettings={setTextureSettings} onOpen3D={() => setStage(4)} canPreview={!!finalPreview} />}
+      {stage === 2 && (
+        <TexturesStudio
+          settings={textureSettings}
+          setSettings={setTextureSettings}
+          onOpen3D={() => setStage(5)}
+          canPreview={!!finalPreview}
+        />
+      )}
 
-      {stage === 3 && <section className="layer-stage">
+      {stage === 3 && <section className="water-stage">
+        <aside className="panel water-controls">
+          <h2>3 · Water</h2>
+          <p className="muted">Preview is shape-agnostic: a disc with a sphere in the middle. Bands show how water will look around any island silhouette.</p>
+          <WaterSettingsPanel
+            settings={exportSettings}
+            setSettings={setExportSettings}
+            autoOceanRadiusM={getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings)}
+          />
+          <div className="actions compact">
+            <button type="button" className="primary" onClick={() => refreshWaterDiscPreview()}>Refresh preview</button>
+          </div>
+        </aside>
+        <main className="panel water-preview-panel">
+          <h2>Top-down disc</h2>
+          {waterDiscPreview?.waterColor ? (
+            <WaterDiscPreview
+              waterColorUrl={waterDiscPreview.waterColor}
+              diameterM={waterDiscPreview.oceanDiameterM || getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings) * 2}
+              sphereRadiusM={waterDiscPreview.previewSphereRadiusM || exportSettings.previewSphereRadiusM}
+            />
+          ) : (
+            <div className="drop-hint big">Open this tab to generate the water disc preview.</div>
+          )}
+        </main>
+      </section>}
+
+      {stage === 4 && <section className="layer-stage">
         <aside className="panel layer-sidebar">
-          <h2>3 · Water & overlay layers</h2>
+          <h2>4 · Overlay layers</h2>
           <p className="muted">Layers are optional and non-destructive. You can have no water layer at all, add one later, or remove its image with the × on the thumbnail.</p>
           <div className="tool-grid">
             <button onClick={() => addLayer('water')}>+ Water</button>
@@ -864,15 +1006,15 @@ export default function App() {
               <button onClick={() => bakeWaterLayer(activeLayer, 'zip')}>Export Stage 3 ZIP</button>
               <button onClick={() => { setBakedHeightmap16(''); setBakedPreview(''); setWaterMask(''); }}>Revert water bake</button>
             </>}
-            <button onClick={() => setStage(4)}>Open 3D viewport</button>
+            <button onClick={() => setStage(5)}>Open 3D viewport</button>
           </div>
-          <p className="small muted">Ocean appearance is configured in <code>shared/viewport_config.json</code>. Sea level is set in Step 1 options.</p>
+          <p className="small muted">Ocean colors are tuned in Stage 3 · Water. Sea level is set in Stage 1.</p>
         </main>
       </section>}
 
-      {stage === 4 && <section className="stage3">
+      {stage === 5 && <section className="stage3">
         <aside className="panel tools">
-          <h2>4 · Sculpt, paint, view, export</h2>
+          <h2>5 · Sculpt, paint, view, export</h2>
           <div className="icon-toolbar" aria-label="Terrain tools">
             {TOOL_DEFS.map(t => <button key={t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label}: ${t.tip}`} aria-label={t.label}><span>{t.icon}</span><small>{t.label}</small></button>)}
           </div>
@@ -890,7 +1032,7 @@ export default function App() {
           <button className="primary" onClick={() => viewportRef.current?.autoTexture()}>Regenerate terrain texture</button>
           <button onClick={() => viewportRef.current?.regenerateTrees()}>Regenerate forest clumps</button>
           <button onClick={() => viewportRef.current?.resetCamera()}>Reset camera</button>
-          <p className="small muted">Ocean tuning: edit <code>shared/viewport_config.json</code> (water section). Paint applies to land only, not the water plane.</p>
+          <p className="small muted">Ocean colors: Stage 3 · Water. Paint applies to land only, not the water plane.</p>
           <h3>Exports</h3>
           <div className="tool-grid">
             <button onClick={() => exportMesh('glb')}>GLB</button>
@@ -902,9 +1044,18 @@ export default function App() {
           <button onClick={() => downloadDataUrl(finalHeight, 'final_heightmap.png')}>Download final heightmap</button>
           {waterMask && <button onClick={() => downloadDataUrl(waterMask, 'water_mask.png')}>Download water mask</button>}
           <button onClick={() => downloadBlob(new Blob([JSON.stringify(recipe, null, 2)], { type: 'application/json' }), 'island_dreamforge_recipe.json')}>Export recipe JSON</button>
+          <ExportProfilePanel
+            settings={exportSettings}
+            setSettings={setExportSettings}
+            canExport={!!finalHeight}
+            derivedMaps={derivedMaps}
+            onRefreshDerivedMaps={refreshDerivedMaps}
+            onExportWeb={exportWebIsland}
+            onExportGame={exportGameIsland}
+          />
         </aside>
         <div className="viewer-wrap">
-          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
+          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
         </div>
       </section>}
     </div>

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import MapPicker from './MapPicker.jsx';
 import HeightProfileChart from './HeightProfileChart.jsx';
+import HeightsMapViewport from './HeightsMapViewport.jsx';
 import {
   CollapsibleSection,
   HelpModal,
@@ -8,6 +8,7 @@ import {
   Swatch,
   WorkflowSteps,
 } from './studioUi.jsx';
+import WorldScalePanel from './WorldScalePanel.jsx';
 
 // ── Shared tune controls ─────────────────────────────────────────────────────
 // Used both in the side rail and in the full-screen fine-tune modal.
@@ -67,43 +68,6 @@ function TuneControls({
         )}
       </CollapsibleSection>
 
-      <CollapsibleSection title="Island scale" defaultOpen={false}>
-        <label>
-          Island width (m)
-          <input type="number" min="10" value={worldSettings.widthM}
-            onChange={(e) => {
-              const widthM = Math.max(10, Number(e.target.value) || 10);
-              setWorldSettings((p) => ({
-                ...p, widthM,
-                depthM: p.lockAspect && mapSizePx.width && mapSizePx.height
-                  ? Math.round(widthM * mapSizePx.height / mapSizePx.width) : p.depthM,
-              }));
-            }}
-          />
-        </label>
-        <label>
-          Island depth (m)
-          <input type="number" min="10"
-            disabled={worldSettings.lockAspect && !!mapSizePx.width}
-            value={derivedDepthM}
-            onChange={(e) => setWorldSettings((p) => ({ ...p, depthM: Math.max(10, Number(e.target.value) || 10) }))}
-          />
-        </label>
-        <label className="checkline">
-          <input type="checkbox" checked={worldSettings.lockAspect}
-            onChange={(e) => setWorldSettings((p) => ({
-              ...p, lockAspect: e.target.checked,
-              depthM: e.target.checked && mapSizePx.width && mapSizePx.height
-                ? Math.round(p.widthM * mapSizePx.height / mapSizePx.width) : p.depthM,
-            }))}
-          />
-          Lock depth to image aspect ratio
-        </label>
-        <p className="small muted">
-          {mapSizePx.width ? `${mapSizePx.width} × ${mapSizePx.height}px` : 'No map loaded'}
-          {metersPerPixel ? ` · ${metersPerPixel.toFixed(2)} m / px` : ''}
-        </p>
-      </CollapsibleSection>
     </>
   );
 }
@@ -158,6 +122,12 @@ function FineTuneModal({
             <HeightProfileChart large hideChrome={false} {...profileProps} />
           </div>
           <div className="fine-tune-controls-col">
+            <WorldScalePanel
+              worldSettings={worldSettings}
+              setWorldSettings={setWorldSettings}
+              mapSizePx={mapSizePx}
+              derivedDepthM={derivedDepthM}
+            />
             <TuneControls
               live
               options={options}
@@ -186,7 +156,6 @@ function HeightsTuneRail({
   derivedDepthM, mapSizePx, metersPerPixel,
   similarRadius, setSimilarRadius,
   advancedOpen, setAdvancedOpen,
-  heightPreview,
   analyzeCount, setAnalyzeCount,
   onAnalyzeColors, onPreviewCleanMap,
 }) {
@@ -196,6 +165,12 @@ function HeightsTuneRail({
         <h3>Live tune</h3>
         <p className="small muted" style={{ margin: '2px 0 10px' }}>Sliders update preview on release.</p>
       </div>
+      <WorldScalePanel
+        worldSettings={worldSettings}
+        setWorldSettings={setWorldSettings}
+        mapSizePx={mapSizePx}
+        derivedDepthM={derivedDepthM}
+      />
       <TuneControls
         live={false}
         options={options} setOptions={setOptions}
@@ -233,12 +208,6 @@ function HeightsTuneRail({
         )}
       </CollapsibleSection>
 
-      {heightPreview && (
-        <details className="height-output-details">
-          <summary>Generated height map</summary>
-          <img className="preview-img" src={heightPreview} alt="Height preview" />
-        </details>
-      )}
     </aside>
   );
 }
@@ -254,7 +223,9 @@ export default function HeightsStudio(props) {
     options, setOptions,
     worldSettings, setWorldSettings,
     derivedDepthM, mapSizePx, metersPerPixel,
-    heightPreview, dominant, cleanedPreview,
+    heightPreview, heightOutOfDate, heightGenerating, canGenerateHeightmap,
+    onEnsureHeightmap,
+    dominant, cleanedPreview,
     analyzeCount, setAnalyzeCount,
     advancedOpen, setAdvancedOpen,
     waterOnlyStarter, islandColorLadder,
@@ -295,21 +266,30 @@ export default function HeightsStudio(props) {
         <div className="heights-desk-title">
           <p className="eyebrow">Step 1 · Heights</p>
           <h2 className="studio-page-heading">Tuning desk</h2>
-          <p className="studio-page-lede compact">Map + elevation profile + tuning in one view.</p>
+          <p className="studio-page-lede compact">
+            Use the main viewport to switch between your color map and the baked height map. Opening the height view generates it automatically when needed.
+          </p>
         </div>
         <WorkflowSteps steps={workflowSteps} />
         <div className="heights-desk-actions">
-          <button type="button" className="primary" onClick={() => onGenerateHeightmap()}>Generate height map</button>
-          <button type="button" onClick={() => onGenerateHeightmap('zip')}>Export ZIP</button>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => onGenerateHeightmap()}
+            disabled={!canGenerateHeightmap || heightGenerating}
+          >
+            {heightPreview && !heightOutOfDate ? 'Regenerate height map' : 'Generate height map'}
+          </button>
+          <button type="button" onClick={() => onGenerateHeightmap('zip')} disabled={!canGenerateHeightmap}>Export ZIP</button>
           <button type="button" className="search-help-trigger" onClick={() => setHelpOpen(true)} aria-label="Help">?</button>
         </div>
       </header>
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} title="Heights tuning desk">
         <ul className="studio-help-list">
-          <li><strong>Map (left)</strong> — click to pick a color, set its height, then Add / update.</li>
-          <li><strong>Cyan line</strong> — smooth terrain preview with slopes; shows how terrain will look when generated. Drag handles or adjust sliders to update it.</li>
-          <li><strong>Green dashed</strong> — last generated height map. Only changes when you hit Generate.</li>
+          <li><strong>Main viewport</strong> — Color map (pick colors), Height map (baked terrain), or Split. Switching to Height auto-generates if the map is missing or out of date.</li>
+          <li><strong>Cyan line (profile)</strong> — smooth terrain preview with slopes. Drag handles or adjust sliders to update it.</li>
+          <li><strong>Green dashed (profile)</strong> — cross-section of the last baked height map.</li>
           <li><strong>Handles</strong> — drag a colored dot on the left Y-axis to change that color's target height. Release to apply.</li>
           <li><strong>⛶ Fine-tune button</strong> — opens a full-screen view with real-time sliders and a large chart.</li>
         </ul>
@@ -334,30 +314,25 @@ export default function HeightsStudio(props) {
               Base map
               <input type="file" accept="image/*" onChange={(e) => onBaseMap(e.target.files[0])} />
             </label>
-            <button type="button" onClick={() => { setSamples(waterOnlyStarter); setPicked(waterOnlyStarter[0].hex); setNewHeight(0); }}>
-              Water-only
-            </button>
-            <button type="button" onClick={() => setSamples(islandColorLadder)}>Color ladder</button>
-            <div className="legend-stack inline">
-              <span><i className="legend-dot draft" /> Preview</span>
-              <span><i className="legend-dot generated" /> Generated</span>
-            </div>
           </div>
 
-          <div className="heights-split-view">
-            <div className="heights-map-pane">
-              <MapPicker
-                imageUrl={mapUrl}
-                mapVersion={mapVersion}
-                picked={picked}
-                pixelPerfect={options.exactColorMode}
-                similarRadius={similarRadius}
-                onPick={(hex) => setPicked(hex)}
-              />
-            </div>
-            <div className="heights-profile-pane">
-              <HeightProfileChart large {...profileProps} />
-            </div>
+          <HeightsMapViewport
+            mapUrl={mapUrl}
+            mapVersion={mapVersion}
+            heightPreview={heightPreview}
+            heightOutOfDate={heightOutOfDate}
+            heightGenerating={heightGenerating}
+            canGenerate={canGenerateHeightmap}
+            samples={samples}
+            options={options}
+            similarRadius={similarRadius}
+            picked={picked}
+            onPick={(hex) => setPicked(hex)}
+            onEnsureHeightmap={onEnsureHeightmap}
+          />
+
+          <div className="heights-profile-row">
+            <HeightProfileChart large {...profileProps} />
           </div>
 
           <div className="heights-samples-dock">
@@ -372,6 +347,20 @@ export default function HeightsStudio(props) {
             </button>
             {!samplesCollapsed && (
               <>
+                <div className="heights-palette-presets">
+                  <span className="small muted">Presets</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSamples(waterOnlyStarter);
+                      setPicked(waterOnlyStarter[0].hex);
+                      setNewHeight(0);
+                    }}
+                  >
+                    Water-only
+                  </button>
+                  <button type="button" onClick={() => setSamples(islandColorLadder)}>Color ladder</button>
+                </div>
                 <div className="picker-row compact">
                   <div className="picked" style={{ background: picked }} />
                   <input value={picked} onChange={(e) => setPicked(e.target.value)} aria-label="Selected color" />
@@ -410,7 +399,6 @@ export default function HeightsStudio(props) {
           derivedDepthM={derivedDepthM} mapSizePx={mapSizePx} metersPerPixel={metersPerPixel}
           similarRadius={similarRadius} setSimilarRadius={setSimilarRadius}
           advancedOpen={advancedOpen} setAdvancedOpen={setAdvancedOpen}
-          heightPreview={heightPreview}
           analyzeCount={analyzeCount} setAnalyzeCount={setAnalyzeCount}
           onAnalyzeColors={onAnalyzeColors} onPreviewCleanMap={onPreviewCleanMap}
         />

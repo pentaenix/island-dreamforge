@@ -1,7 +1,17 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import {
+  buildSlopeFieldFromHeights,
+  paintProceduralTerrainTexture,
+} from './proceduralTerrainTexture.js';
+import {
+  clampMeshResolution,
+  elevationMetersFromNormalized,
+  getIslandHorizonScale,
+  getOceanDiscRadiusM,
+  meshSpacingCells,
+} from './worldSettings.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Water } from 'three/examples/jsm/objects/Water.js';
 
 const SKYBOX_CUBE_PATH = '/island-assets/skybox/sky_03_2k/sky_03_cubemap_2k';
 const SKYBOX_MAX_DISTANCE = 5800;
@@ -136,6 +146,29 @@ function loadImage(src) {
   });
 }
 
+async function loadImageData(src, cols, rows) {
+  if (!src) return null;
+  try {
+    const img = await loadImage(src);
+    const canvas = document.createElement('canvas');
+    canvas.width = cols;
+    canvas.height = rows;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, cols, rows);
+    return ctx.getImageData(0, 0, cols, rows);
+  } catch (err) {
+    console.warn('Preview map failed to load', src, err);
+    return null;
+  }
+}
+
+function channelAt(imageData, rows, cols, r, c, channel = 0) {
+  if (!imageData?.data) return 0;
+  const rr = clamp(Math.round(r), 0, rows - 1);
+  const cc = clamp(Math.round(c), 0, cols - 1);
+  return imageData.data[(rr * cols + cc) * 4 + channel];
+}
+
 async function loadPatternImage(src, fallbackSrc) {
   try {
     const img = await loadImage(src);
@@ -173,7 +206,15 @@ function isUnderwaterAt(s, r, c, seaNorm) {
 
 function vegetationSettings(s, textureSettings = {}) {
   const base = s.viewportConfig?.vegetation || DEFAULT_VIEWPORT_CONFIG.vegetation;
-  return { ...base, ...textureSettings };
+  const ts = textureSettings || {};
+  return {
+    ...base,
+    maxSlopeDeg: ts.forestSlopeFade ?? base.maxSlopeDeg,
+    seed: ts.treeSeed ?? base.seed,
+    minHeightM: ts.treeMinHeightM ?? base.minHeightM,
+    wallTreeSlopeStart: ts.wallTreeSlopeStart ?? base.wallTreeSlopeStart,
+    enabled: ts.showForestClumps === true ? base.enabled !== false : false,
+  };
 }
 
 function loadSkyboxCube() {
@@ -240,7 +281,7 @@ function applyOrbitLimits(controls, rows = 64, cols = 64, world = {}) {
 function frameCinematicCamera(s, props = {}) {
   if (!s.camera || !s.controls) return;
   const dims = getWorldDims(s.rows || 64, s.cols || 64, props.worldSettings || {});
-  const maxH = Number(props.maxHeightM || 500);
+  const maxH = Number(props.maxHeightM || 500) * getIslandHorizonScale(props.worldSettings || {});
   const dist = Math.min(Math.max(dims.width, dims.depth) * 1.05, s.controls.maxDistance * 0.8);
   const y = Math.max(90, maxH * 0.38);
   s.camera.position.set(dist * 0.5, y, dist * 1.02);
@@ -299,24 +340,30 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   textureSettings,
   layers = [],
   worldSettings = { widthM: 1480, depthM: 1086, verticalExaggeration: 1 },
+  waterDepthUrl = '',
+  waterColorUrl = '',
+  islandMaskUrl = '',
+  materialPreviewUrl = '',
+  showSeafloor = false,
+  oceanSettings = {},
 }, ref) {
   const mountRef = useRef(null);
   const hudRef = useRef(null);
   const heightUrlRef = useRef(heightUrl);
   heightUrlRef.current = heightUrl;
   const viewportReadyRef = useRef(false);
-  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings });
-  propsRef.current = { tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings };
+  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings });
+  propsRef.current = { tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings };
 
   const stateRef = useRef({
-    rows: 0, cols: 0, heights: null,
+    rows: 0, cols: 0, heights: null, islandMask: null, materialPreview: null,
     geometry: null, mesh: null, material: null,
     renderer: null, camera: null, scene: null, controls: null,
     textureCanvas: null, textureContext: null, texture: null,
     normalCanvas: null, normalContext: null, normalTexture: null,
     patterns: {}, isPainting: false,
     raycaster: new THREE.Raycaster(), pointer: new THREE.Vector2(),
-    water: null, waterNormals: null, skybox: null, viewportConfig: null,
+    water: null, waterNormals: null, skybox: null, viewportConfig: null, seafloor: null, coastlineSkirt: null,
     patternTextures: {}, overlayGroup: null, vegetationGroup: null, brushRing: null,
     lastPointer: { x: 0, y: 0, hit: false },
   });
@@ -507,14 +554,41 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const s = stateRef.current;
     if (s.water) s.water.position.y = Number(seaLevelM || 0);
   }, [seaLevelM]);
-  useEffect(() => { const s = stateRef.current; if (heightUrl && s.heights) rebuildTerrain(heightUrl); }, [worldSettings?.widthM, worldSettings?.depthM, worldSettings?.verticalExaggeration]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (heightUrl && s.heights) rebuildTerrain(heightUrl);
+  }, [
+    worldSettings?.widthM,
+    worldSettings?.depthM,
+    worldSettings?.verticalExaggeration,
+    worldSettings?.terrainMeshResolution,
+    worldSettings?.featureSpacingM,
+    worldSettings?.featureScale,
+  ]);
+  useEffect(() => { const s = stateRef.current; if (heightUrl && s.heights) rebuildTerrain(heightUrl); }, [waterDepthUrl, waterColorUrl, islandMaskUrl, materialPreviewUrl, showSeafloor]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.scene || !s.heights) return;
+    rebuildWaterOnly();
+  }, [
+    worldSettings?.widthM,
+    worldSettings?.depthM,
+    oceanSettings?.oceanRadiusM,
+    oceanSettings?.oceanRadiusAuto,
+    oceanSettings?.shoreShelfWidthM,
+    oceanSettings?.midWaterDistanceM,
+    oceanSettings?.deepWaterDistanceM,
+    oceanSettings?.waterColorSteps,
+    oceanSettings?.waterNoiseStrength,
+    oceanSettings?.waterNoiseScaleM,
+  ]);
   useEffect(() => { const s = stateRef.current; if (s.scene && s.mesh) renderOverlayObjects(s, layers || []); }, [layers, heightUrl, maxHeightM]);
 
   async function rebuildTerrain(src) {
     const s = stateRef.current;
     if (!s.scene) return;
     const img = await loadImage(src);
-    const maxGrid = 230;
+    const maxGrid = clampMeshResolution(propsRef.current.worldSettings?.terrainMeshResolution, 64, 1024);
     const ratio = img.width / Math.max(1, img.height);
     let cols = maxGrid;
     let rows = Math.max(16, Math.round(maxGrid / ratio));
@@ -531,11 +605,30 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     if (s.water) {
       s.scene.remove(s.water);
       s.water.geometry?.dispose();
+      s.water.material?.uniforms?.depthMap?.value?.dispose?.();
+      s.water.material?.map?.dispose?.();
       s.water.material?.dispose();
       s.water.material?.uniforms?.mirrorSampler?.value?.dispose?.();
     }
+    if (s.seafloor) {
+      s.scene.remove(s.seafloor);
+      s.seafloor.geometry?.dispose();
+      s.seafloor.material?.dispose();
+      s.seafloor = null;
+    }
+    if (s.coastlineSkirt) {
+      s.scene.remove(s.coastlineSkirt);
+      s.coastlineSkirt.geometry?.dispose();
+      s.coastlineSkirt.material?.dispose();
+      s.coastlineSkirt = null;
+    }
 
-    s.rows = rows; s.cols = cols; s.heights = heights;
+    const [islandMask, materialPreview] = await Promise.all([
+      loadImageData(propsRef.current.islandMaskUrl, cols, rows),
+      loadImageData(propsRef.current.materialPreviewUrl, cols, rows),
+    ]);
+
+    s.rows = rows; s.cols = cols; s.heights = heights; s.islandMask = islandMask; s.materialPreview = materialPreview;
     const texSize = clamp(Number(propsRef.current.textureSettings?.textureSize || 1024), 512, 2048);
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = texSize; textureCanvas.height = texSize;
     const normalCanvas = document.createElement('canvas'); normalCanvas.width = texSize; normalCanvas.height = texSize;
@@ -548,7 +641,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     normalTexture.wrapS = THREE.ClampToEdgeWrapping; normalTexture.wrapT = THREE.ClampToEdgeWrapping;
     s.texture = texture; s.normalTexture = normalTexture;
 
-    const geometry = makeGeometry(heights, rows, cols, Number(maxHeightM || 500), propsRef.current.worldSettings || {});
+    const geometry = makeGeometry(heights, rows, cols, Number(maxHeightM || 500), propsRef.current.worldSettings || {}, islandMask, Number(propsRef.current.seaLevelM || 0));
     const st = propsRef.current.textureSettings || {};
     const envIntensity = Number(s.viewportConfig?.lighting?.envMapIntensity ?? 1.05);
     const material = new THREE.MeshStandardMaterial({
@@ -568,12 +661,26 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     s.geometry = geometry; s.mesh = mesh; s.material = material;
     s.scene.add(mesh);
 
-    const water = makeWaterPlane(
+    // Diorama preview: flat painted ocean only — no coast skirt or 3D seafloor bowl (export-only).
+    s.coastlineSkirt = null;
+
+    const seafloor = await makeSeafloorMesh(
+      propsRef.current.waterDepthUrl,
+      propsRef.current.showSeafloor,
+      rows,
+      cols,
+      propsRef.current.worldSettings || {},
+      propsRef.current.oceanSettings || {},
+      Number(propsRef.current.seaLevelM || 0),
+    );
+    s.seafloor = seafloor;
+    if (seafloor) s.scene.add(seafloor);
+
+    const water = await makeWaterPlane(
       Number(propsRef.current.seaLevelM || 0),
       propsRef.current.worldSettings || {},
       rows,
       cols,
-      s.waterNormals,
     );
     s.water = water;
     if (water) s.scene.add(water);
@@ -585,21 +692,52 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     }
   }
 
-  function makeGeometry(heights, rows, cols, maxH, world = {}) {
+  async function rebuildWaterOnly() {
+    const s = stateRef.current;
+    if (!s.scene || !s.heights) return;
+    if (s.water) {
+      s.scene.remove(s.water);
+      s.water.geometry?.dispose();
+      s.water.material?.map?.dispose?.();
+      s.water.material?.dispose();
+      s.water = null;
+    }
+    const water = await makeWaterPlane(
+      Number(propsRef.current.seaLevelM || 0),
+      propsRef.current.worldSettings || {},
+      s.rows,
+      s.cols,
+    );
+    s.water = water;
+    if (water) s.scene.add(water);
+  }
+
+  function mapLandPredicate(heights, maxH, islandMask, seaLevel, world = {}) {
+    return (idx) => {
+      const sourceLand = elevationMetersFromNormalized(heights[idx], maxH, world) > seaLevel + 0.05;
+      if (sourceLand) return true;
+      if (islandMask?.data) return islandMask.data[idx * 4] > 127;
+      return false;
+    };
+  }
+
+  function makeGeometry(heights, rows, cols, maxH, world = {}, islandMask = null, seaLevel = 0) {
     const { width, depth } = getWorldDims(rows, cols, world);
     const vertices = new Float32Array(rows * cols * 3);
     const uvs = new Float32Array(rows * cols * 2);
     for (let r = 0; r < rows; r++) for (let col = 0; col < cols; col++) {
       const i = r * cols + col;
       vertices[i * 3] = (col / (cols - 1) - 0.5) * width;
-      vertices[i * 3 + 1] = heights[i] * maxH;
+      vertices[i * 3 + 1] = elevationMetersFromNormalized(heights[i], maxH, world);
       vertices[i * 3 + 2] = (r / (rows - 1) - 0.5) * depth;
       uvs[i * 2] = col / (cols - 1); uvs[i * 2 + 1] = 1 - r / (rows - 1);
     }
     const indices = [];
+    const isLandVertex = mapLandPredicate(heights, maxH, islandMask, seaLevel, world);
     for (let r = 0; r < rows - 1; r++) for (let col = 0; col < cols - 1; col++) {
       const a = r * cols + col, b = a + 1, c = (r + 1) * cols + col, d = c + 1;
-      indices.push(a, c, b, b, c, d);
+      if (isLandVertex(a) && isLandVertex(c) && isLandVertex(b)) indices.push(a, c, b);
+      if (isLandVertex(b) && isLandVertex(c) && isLandVertex(d)) indices.push(b, c, d);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
@@ -608,177 +746,297 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     return geometry;
   }
 
+  function makeCoastlineSkirtMesh(heights, rows, cols, maxH, world = {}, islandMask = null, seaLevel = 0, skirtDepth = 40) {
+    const isLandVertex = mapLandPredicate(heights, maxH, islandMask, seaLevel, world);
+    const { width, depth } = getWorldDims(rows, cols, world);
+    const vertices = [];
+    const indices = [];
+    const bottomY = Number(seaLevel || 0) - Math.max(2, Number(skirtDepth || 40));
+    const addVertex = (idx, yOverride = null) => {
+      const r = Math.floor(idx / cols);
+      const col = idx % cols;
+      const baseX = (col / Math.max(1, cols - 1) - 0.5) * width;
+      const baseZ = (r / Math.max(1, rows - 1) - 0.5) * depth;
+      vertices.push(
+        baseX,
+        yOverride == null ? Math.max(elevationMetersFromNormalized(heights[idx], maxH, world), Number(seaLevel || 0) + 0.15) : yOverride,
+        baseZ,
+      );
+      return vertices.length / 3 - 1;
+    };
+    const addEdge = (a, b) => {
+      const topA = addVertex(a);
+      const topB = addVertex(b);
+      const botA = addVertex(a, bottomY);
+      const botB = addVertex(b, bottomY);
+      indices.push(topA, botA, topB, topB, botA, botB);
+    };
+    for (let r = 0; r < rows - 1; r++) for (let col = 0; col < cols - 1; col++) {
+      const a = r * cols + col, b = a + 1, c = (r + 1) * cols + col, d = c + 1;
+      if (isLandVertex(a) && isLandVertex(b) && (!isLandVertex(c) || !isLandVertex(d))) addEdge(a, b);
+      if (isLandVertex(c) && isLandVertex(d) && (!isLandVertex(a) || !isLandVertex(b))) addEdge(d, c);
+      if (isLandVertex(a) && isLandVertex(c) && (!isLandVertex(b) || !isLandVertex(d))) addEdge(c, a);
+      if (isLandVertex(b) && isLandVertex(d) && (!isLandVertex(a) || !isLandVertex(c))) addEdge(b, d);
+    }
+    if (!indices.length) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xb9aa7d,
+      roughness: 0.9,
+      metalness: 0,
+      envMap: stateRef.current.skybox || null,
+      envMapIntensity: 0.32,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'coastline-skirt-preview';
+    mesh.receiveShadow = true;
+    return mesh;
+  }
+
+  async function makeSeafloorMesh(depthUrl, enabled, rows, cols, world = {}, ocean = {}, seaLevel = 0) {
+    if (!enabled || !depthUrl) return null;
+    const img = await loadImage(depthUrl);
+    const c = document.createElement('canvas');
+    c.width = cols; c.height = rows;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, cols, rows);
+    const data = ctx.getImageData(0, 0, cols, rows).data;
+    const { width, depth } = getWorldDims(rows, cols, world);
+    const maxDepth = Number(ocean.maxOceanDepthM || 220);
+    const vertices = new Float32Array(rows * cols * 3);
+    const colors = new Float32Array(rows * cols * 3);
+    const active = new Uint8Array(rows * cols);
+    for (let r = 0; r < rows; r++) for (let col = 0; col < cols; col++) {
+      const i = r * cols + col;
+      const t = data[i * 4] / 255;
+      active[i] = t > 0.004 ? 1 : 0;
+      vertices[i * 3] = (col / (cols - 1) - 0.5) * width;
+      vertices[i * 3 + 1] = Number(seaLevel || 0) - t * maxDepth;
+      vertices[i * 3 + 2] = (r / (rows - 1) - 0.5) * depth;
+      colors[i * 3] = 0.05 + (1 - t) * 0.16;
+      colors[i * 3 + 1] = 0.24 + (1 - t) * 0.32;
+      colors[i * 3 + 2] = 0.42 + t * 0.42;
+    }
+    const indices = [];
+    for (let r = 0; r < rows - 1; r++) for (let col = 0; col < cols - 1; col++) {
+      const a = r * cols + col, b = a + 1, c0 = (r + 1) * cols + col, d = c0 + 1;
+      if (!(active[a] && active[b] && active[c0] && active[d])) continue;
+      indices.push(a, c0, b, b, c0, d);
+    }
+    if (!indices.length) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.92,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.82,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'derived-seafloor-preview';
+    mesh.receiveShadow = true;
+    return mesh;
+  }
+
   function heightAt(s, rr, cc) {
     const r = clamp(Math.round(rr), 0, s.rows - 1);
     const c = clamp(Math.round(cc), 0, s.cols - 1);
     return s.heights[r * s.cols + c] || 0;
   }
+  function isLandAt(s, rr, cc, seaNorm) {
+    const r = clamp(Math.round(rr), 0, s.rows - 1);
+    const c = clamp(Math.round(cc), 0, s.cols - 1);
+    if (s.islandMask?.data) return channelAt(s.islandMask, s.rows, s.cols, r, c, 0) > 127;
+    return !isUnderwaterAt(s, r, c, seaNorm);
+  }
+  function materialPreviewColorAt(s, rr, cc) {
+    if (!s.materialPreview?.data) return null;
+    const r = clamp(Math.round(rr), 0, s.rows - 1);
+    const c = clamp(Math.round(cc), 0, s.cols - 1);
+    const p = (r * s.cols + c) * 4;
+    return [s.materialPreview.data[p], s.materialPreview.data[p + 1], s.materialPreview.data[p + 2]];
+  }
   function slopeAt(s, r, c) {
-    const dx = Math.abs(heightAt(s, r, c + 1) - heightAt(s, r, c - 1));
-    const dy = Math.abs(heightAt(s, r + 1, c) - heightAt(s, r - 1, c));
-    return Math.atan(Math.sqrt(dx * dx + dy * dy) * Number(propsRef.current.maxHeightM || 500) / 7.5) * 180 / Math.PI;
+    const maxH = Number(propsRef.current.maxHeightM || 500);
+    const world = propsRef.current.worldSettings || {};
+    const worldMaxH = maxH * getIslandHorizonScale(world);
+    const { width, depth } = getWorldDims(s.rows, s.cols, world);
+    const cellX = width / Math.max(1, s.cols - 1);
+    const cellZ = depth / Math.max(1, s.rows - 1);
+    const dx = Math.abs(heightAt(s, r, c + 1) - heightAt(s, r, c - 1)) * worldMaxH / Math.max(1, cellX * 2);
+    const dz = Math.abs(heightAt(s, r + 1, c) - heightAt(s, r - 1, c)) * worldMaxH / Math.max(1, cellZ * 2);
+    return Math.atan(Math.sqrt(dx * dx + dz * dz)) * 180 / Math.PI;
   }
 
   function paintAutoTexture(s, clearPaint = false) {
-    const ctx = s.textureContext, canvas = s.textureCanvas, nctx = s.normalContext, ncanvas = s.normalCanvas;
-    if (!ctx || !canvas || !s.heights) return;
-    const settings = propsRef.current.textureSettings || {};
-    const rules = terrainRules(s, settings);
+    const ctx = s.textureContext;
+    const canvas = s.textureCanvas;
+    const nctx = s.normalContext;
+    if (!ctx || !canvas || !nctx || !s.heights) return;
+
+    const textureSettings = propsRef.current.textureSettings || {};
+    const settings = { ...terrainRules(s, textureSettings), ...textureSettings };
     const size = canvas.width;
-    const img = ctx.createImageData(size, size);
-    const normalImg = nctx.createImageData(size, size);
     const maxH = Number(propsRef.current.maxHeightM || 500);
-    const seaNorm = Number(propsRef.current.seaLevelM || 0) / Math.max(1, maxH);
-    const sandNorm = Number(rules.sandHeightM ?? 14) / Math.max(1, maxH);
-    const wetNorm = Number(rules.wetSandWidthM ?? 5) / Math.max(1, maxH);
-    const pixel = Math.max(1, Number(settings.pixelSize || 2));
-    const fuzzy = Number(settings.fuzziness ?? 0.18);
-    const variation = Number(settings.variation ?? 0.22);
-    const rockStart = Number(rules.rockSlopeStart ?? 50);
-    const rockBlend = Number(rules.rockSlopeBlend ?? 14);
-    const forestFade = Number(rules.forestSlopeFade ?? 48);
-    const treeDensity = Number(rules.treeDensity ?? settings.treeDensity ?? 0.88);
-    const treePixel = Math.max(2, Number(rules.treePixelSize ?? settings.treePixelSize ?? 4));
-    const gravelAmount = Number(rules.gravelAmount ?? 0.12);
-    const rockFeature = Number(settings.rockFeatureScale ?? 0.55);
-    const contrast = Number(settings.materialContrast ?? 0.38);
-    const forestMin = Number(rules.forestHeightMin ?? 0.04);
-    const forestMax = Number(rules.forestHeightMax ?? 0.95);
-    const tilingM = Number(s.viewportConfig?.terrainTextures?.tilingM ?? 28);
-    const sunDir = getSunDirection(s.viewportConfig);
-    const { width, depth } = getWorldDims(s.rows, s.cols, propsRef.current.worldSettings || {});
-    const pat = s.patterns;
-    const norms = s.patternNormals || {};
-    const fallback = {
-      sand: [226, 207, 146], grass: [96, 154, 75], forest: [48, 118, 56],
-      treesDark: [30, 86, 44], rock: [125, 118, 104], rockLight: [167, 158, 136],
-      gravel: [151, 139, 116], wetSand: [186, 169, 128],
-    };
+    const world = propsRef.current.worldSettings || {};
+    const worldMaxH = maxH * getIslandHorizonScale(world);
+    const seaNorm = Number(propsRef.current.seaLevelM || 0) / Math.max(1, worldMaxH);
+    const sandNorm = Number(settings.sandHeightM ?? 14) / Math.max(1, worldMaxH);
+    const { width, depth } = getWorldDims(s.rows, s.cols, world);
+    const pat = s.patterns || {};
+    const tilingM = Number(settings.tilingM ?? s.viewportConfig?.terrainTextures?.tilingM ?? 36);
     const tileU = (wx, pw) => ((wx % pw) + pw) % pw / Math.max(1, pw);
     const tileV = (wz, ph) => ((wz % ph) + ph) % ph / Math.max(1, ph);
+
+    const sampleMaterial = (id, tu, tv) => {
+      const key = id === 'trees' ? (pat.trees ? 'trees' : 'grass') : id;
+      const entry = pat[key] || (id === 'wet_sand' ? (pat.wet_sand || pat.sand) : null) || pat.sand;
+      if (!entry) return null;
+      return samplePattern(entry, tu, tv);
+    };
+
+    const slopes = buildSlopeFieldFromHeights(s.heights, s.rows, s.cols, {
+      widthM: width,
+      depthM: depth,
+      maxHeightM: worldMaxH,
+    });
+
     let previous = null;
     if (settings.preservePaintedEdits && !clearPaint) {
       try { previous = ctx.getImageData(0, 0, size, size); } catch { previous = null; }
     }
-    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-      const blockX = Math.floor(x / pixel) * pixel;
-      const blockY = Math.floor(y / pixel) * pixel;
-      const r = Math.floor((y / size) * s.rows);
-      const c = Math.floor((x / size) * s.cols);
-      const h = heightAt(s, r, c);
-      const slope = slopeAt(s, r, c);
-      const coarse = fbm(blockX / (6 + pixel), blockY / (6 + pixel), 12);
-      const fine = fbm(x / Math.max(2, pixel), y / Math.max(2, pixel), 31);
-      const treeNoise = fbm(Math.floor(x / treePixel), Math.floor(y / treePixel), 55);
-      const rockNoise = fbm(x / 18, y / 5, 88);
-      const gravelNoise = fbm(x / 3, y / 3, 99);
-      let color;
-      const shore = smoothstep(seaNorm, seaNorm + wetNorm, h);
-      const rockT = smoothstep(rockStart, rockStart + rockBlend, slope);
-      const forestBlock = (treeNoise < treeDensity && slope < forestFade) ? 1 : 0;
-      const highForest = smoothstep(forestMin, forestMax, h) * (1 - rockT) * (0.62 + 0.38 * forestBlock);
-      const gravelT = gravelAmount * smoothstep(22, 38, slope) * (1 - rockT) * smoothstep(sandNorm * 0.5, 0.22, h);
-      const worldX = (c / Math.max(1, s.cols - 1)) * width;
-      const worldZ = (r / Math.max(1, s.rows - 1)) * depth;
-      const tu = tileU(worldX / tilingM, pat.sand?.w || 256);
-      const tv = tileV(worldZ / tilingM, pat.sand?.h || 256);
-      const sandRgb = samplePattern(pat.sand, tu, tv) || fallback.sand;
-      const grassRgb = samplePattern(pat.grass, tileU((worldX + 11) / tilingM, pat.grass?.w || 256), tileV((worldZ + 7) / tilingM, pat.grass?.h || 256)) || fallback.grass;
-      const treeRgb = samplePattern(pat.trees || pat.grass, tileU((worldX + 19) / tilingM, pat.trees?.w || 256), tileV((worldZ + 13) / tilingM, pat.trees?.h || 256)) || grassRgb;
-      const wetRgb = samplePattern(pat.wet_sand || pat.sand, tileU((worldX + 3) / tilingM, pat.wet_sand?.w || 256), tileV((worldZ + 5) / tilingM, pat.wet_sand?.h || 256)) || fallback.wetSand;
-      const rockRgb = samplePattern(pat.rock, tileU((worldX * 0.5) / tilingM, pat.rock?.w || 256), tileV((worldZ * 0.5) / tilingM, pat.rock?.h || 256)) || fallback.rock;
-      const gravelRgb = samplePattern(pat.gravel, tileU((worldX * 0.35) / tilingM, pat.gravel?.w || 256), tileV((worldZ * 0.35) / tilingM, pat.gravel?.h || 256)) || fallback.gravel;
-      let normalRgb = [128, 128, 255];
-      if (isUnderwaterAt(s, r, c, seaNorm)) {
-        color = [0, 0, 0];
-        normalRgb = [128, 128, 255];
-      } else if (h < seaNorm + wetNorm) {
-        color = mixRgb(wetRgb, sandRgb, shore);
-      } else if (h < seaNorm + sandNorm) {
-        color = mixRgb(sandRgb, grassRgb, smoothstep(seaNorm + wetNorm, seaNorm + sandNorm, h));
-      } else {
-        const canopyDark = mixRgb(treeRgb, fallback.treesDark, 0.35 + treeNoise * 0.25);
-        const forestRgb = mixRgb(grassRgb, canopyDark, highForest * (0.72 + 0.28 * treeNoise));
-        const gravelMix = mixRgb(forestRgb, gravelRgb, gravelT * (0.35 + 0.45 * gravelNoise));
-        const rockCol = mixRgb(rockRgb, fallback.rockLight, rockNoise * 0.45 + fine * 0.1);
-        color = mixRgb(gravelMix, rockCol, rockT);
-        if (rockT > 0.35) color = mixRgb(color, rockCol, Math.min(1, rockT * 1.1));
-        const nx = (c / Math.max(1, s.cols - 1) - 0.5) * 2;
-        const nz = (r / Math.max(1, s.rows - 1) - 0.5) * 2;
-        const lightBias = clamp(0.5 + 0.5 * (nx * sunDir.x * 0.7 + nz * sunDir.z * 0.55 + sunDir.y * 0.25), 0, 1);
-        const highlight = [clamp(color[0] * 1.18 + 18), clamp(color[1] * 1.14 + 22), clamp(color[2] * 0.96)];
-        const shadow = [color[0] * 0.68, color[1] * 0.74, color[2] * 0.82];
-        color = mixRgb(mixRgb(color, shadow, (1 - lightBias) * 0.22), highlight, lightBias * 0.3);
-        const nGrass = samplePatternNormal(norms.grass, tu, tv);
-        const nRock = samplePatternNormal(norms.rock, tu, tv);
-        const nSand = samplePatternNormal(norms.sand, tu, tv);
-        const nGravel = samplePatternNormal(norms.gravel, tu, tv);
-        normalRgb = mixRgb(mixRgb(nGrass, nSand, shore), mixRgb(nGravel, nRock, rockT), rockT * 0.65 + gravelT * 0.2);
-      }
-      const artistNoise = (fine - 0.5) * 18 * variation;
-      const p = (y * size + x) * 4;
-      const fuzzMask = 1 - fuzzy * 0.12 + fuzzy * (0.65 + coarse * 0.35);
-      const mid = 128 + (color[0] + color[1] + color[2]) / 3 - 128;
-      const contrasted = [
-        clamp(mid + (color[0] - mid) * (1 + contrast), 0, 255),
-        clamp(mid + (color[1] - mid) * (1 + contrast), 0, 255),
-        clamp(mid + (color[2] - mid) * (1 + contrast), 0, 255),
-      ];
-      const underwater = isUnderwaterAt(s, r, c, seaNorm);
-      img.data[p] = clamp(Math.round(contrasted[0] * fuzzMask + artistNoise), 0, 255);
-      img.data[p + 1] = clamp(Math.round(contrasted[1] * fuzzMask + artistNoise), 0, 255);
-      img.data[p + 2] = clamp(Math.round(contrasted[2] * fuzzMask + artistNoise * 0.45), 0, 255);
-      img.data[p + 3] = underwater ? 0 : 255;
 
-      const bump = (fine - 0.5) * Number(settings.normalStrength ?? 0.56) * 40;
-      normalImg.data[p] = clamp(Math.round(normalRgb[0] + bump * 0.15), 0, 255);
-      normalImg.data[p + 1] = clamp(Math.round(normalRgb[1] + bump * 0.1), 0, 255);
-      normalImg.data[p + 2] = clamp(Math.round(normalRgb[2]), 0, 255);
-      normalImg.data[p + 3] = underwater ? 0 : 255;
-      if (previous && previous.data[p + 3] > 0 && img.data[p + 3] > 0) {
-        // A gentle preserve blend keeps manual painting alive without trapping old broken textures forever.
-        const keep = 0.35;
-        img.data[p] = Math.round(img.data[p] * (1 - keep) + previous.data[p] * keep);
-        img.data[p + 1] = Math.round(img.data[p + 1] * (1 - keep) + previous.data[p + 1] * keep);
-        img.data[p + 2] = Math.round(img.data[p + 2] * (1 - keep) + previous.data[p + 2] * keep);
+    const painted = paintProceduralTerrainTexture({
+      size,
+      heights: s.heights,
+      slopes,
+      rows: s.rows,
+      cols: s.cols,
+      settings,
+      seaNorm,
+      sandNorm,
+      worldW: width,
+      worldD: depth,
+      landAt: (r, c, h) => isLandAt(s, r, c, seaNorm) && h > seaNorm + 0.02,
+      sampleMaterial: Object.keys(pat).length ? sampleMaterial : null,
+    });
+
+    const img = painted.color;
+    if (previous) {
+      for (let p = 0; p < img.data.length; p += 4) {
+        if (previous.data[p + 3] > 0 && img.data[p + 3] > 0) {
+          const keep = 0.35;
+          img.data[p] = Math.round(img.data[p] * (1 - keep) + previous.data[p] * keep);
+          img.data[p + 1] = Math.round(img.data[p + 1] * (1 - keep) + previous.data[p + 1] * keep);
+          img.data[p + 2] = Math.round(img.data[p + 2] * (1 - keep) + previous.data[p + 2] * keep);
+        }
       }
     }
+
     ctx.putImageData(img, 0, 0);
-    nctx.putImageData(normalImg, 0, 0);
+    nctx.putImageData(painted.normal, 0, 0);
     if (s.texture) s.texture.needsUpdate = true;
     if (s.normalTexture) s.normalTexture.needsUpdate = true;
   }
 
-  function makeWaterPlane(seaLevel, world = {}, rows = 64, cols = 64, waterNormals = null) {
+  function setOceanDiscGridUvs(geometry, width, depth) {
+    const pos = geometry.attributes.position;
+    const uvs = new Float32Array(pos.count * 2);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      uvs[i * 2] = x / Math.max(1, width) + 0.5;
+      uvs[i * 2 + 1] = y / Math.max(1, depth) + 0.5;
+    }
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  }
+
+  async function makeWaterPlane(seaLevel, world = {}, rows = 64, cols = 64) {
     const cfg = stateRef.current.viewportConfig?.water || DEFAULT_VIEWPORT_CONFIG.water;
-    if (!waterNormals || cfg.enabled === false) return null;
+    if (cfg.enabled === false) return null;
     const dims = getWorldDims(rows, cols, world);
-    const extent = dims.radius * Number(cfg.planeScale ?? 2.15);
-    const geometry = new THREE.PlaneGeometry(extent, extent, 1, 1);
-    const sunDir = getSunDirection(stateRef.current.viewportConfig || { water: cfg });
-    const water = new Water(geometry, {
-      textureWidth: Number(cfg.textureWidth ?? 1024),
-      textureHeight: Number(cfg.textureHeight ?? 1024),
-      waterNormals,
-      sunDirection: sunDir,
-      sunColor: hexColor(cfg.sunColor, 0xfff4d6),
-      waterColor: hexColor(cfg.waterColor, 0x004a6e),
-      distortionScale: Number(cfg.distortionScale ?? 3.4),
-      alpha: Number(cfg.alpha ?? 1),
-      clipBias: Number(cfg.clipBias ?? 0),
-      fog: false,
-    });
+    const { width, depth } = dims;
+    const ocean = propsRef.current.oceanSettings || {};
+    const discRadius = getOceanDiscRadiusM(world, {}, ocean);
+    const waterColorUrl = propsRef.current.waterColorUrl;
+
+    let material;
+    if (waterColorUrl) {
+      const tex = await new Promise((resolve, reject) => {
+        new THREE.TextureLoader().load(waterColorUrl, resolve, undefined, reject);
+      });
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.minFilter = THREE.NearestFilter;
+      tex.magFilter = THREE.NearestFilter;
+      material = new THREE.MeshBasicMaterial({
+        map: tex,
+        transparent: true,
+        alphaTest: 0.04,
+        depthWrite: true,
+        side: THREE.DoubleSide,
+      });
+    } else {
+      material = new THREE.MeshBasicMaterial({
+        color: 0x1a6f9e,
+        transparent: true,
+        alphaTest: 0.04,
+        depthWrite: true,
+        side: THREE.DoubleSide,
+      });
+    }
+
+    const geometry = new THREE.CircleGeometry(discRadius, 128);
+    setOceanDiscGridUvs(geometry, width, depth);
+    const water = new THREE.Mesh(geometry, material);
     water.rotation.x = -Math.PI / 2;
-    water.position.y = seaLevel;
+    water.position.y = seaLevel + 0.02;
+    water.renderOrder = 2;
     water.name = 'island-ocean';
     water.userData.isOcean = true;
+    water.userData.discDiameterM = discRadius * 2;
     return water;
   }
 
-  function animateWater(s, time) {
-    if (!s.water?.material?.uniforms?.time) return;
-    const speed = Number(s.viewportConfig?.water?.waveSpeed ?? 0.85);
-    s.water.material.uniforms.time.value = time * speed;
+  function makeLandDistanceField(rows, cols, heights, maxH, seaLevel, islandMask = null, world = {}) {
+    const mapLand = new Uint8Array(rows * cols);
+    const isLand = mapLandPredicate(heights || new Float32Array(rows * cols), maxH, islandMask, seaLevel, world);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const idx = r * cols + c;
+      if (isLand(idx)) mapLand[idx] = 1;
+    }
+    const dist = new Float32Array(rows * cols);
+    const inf = Math.max(rows, cols) * 4;
+    for (let i = 0; i < dist.length; i++) dist[i] = mapLand[i] ? 0 : inf;
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      const p = y * cols + x;
+      if (x > 0) dist[p] = Math.min(dist[p], dist[p - 1] + 1);
+      if (y > 0) dist[p] = Math.min(dist[p], dist[p - cols] + 1);
+      if (x > 0 && y > 0) dist[p] = Math.min(dist[p], dist[p - cols - 1] + 1.414);
+      if (x < cols - 1 && y > 0) dist[p] = Math.min(dist[p], dist[p - cols + 1] + 1.414);
+    }
+    for (let y = rows - 1; y >= 0; y--) for (let x = cols - 1; x >= 0; x--) {
+      const p = y * cols + x;
+      if (x < cols - 1) dist[p] = Math.min(dist[p], dist[p + 1] + 1);
+      if (y < rows - 1) dist[p] = Math.min(dist[p], dist[p + cols] + 1);
+      if (x < cols - 1 && y < rows - 1) dist[p] = Math.min(dist[p], dist[p + cols + 1] + 1.414);
+      if (x > 0 && y < rows - 1) dist[p] = Math.min(dist[p], dist[p + cols - 1] + 1.414);
+    }
+    return dist;
+  }
+
+  function animateWater() {
+    // The stylized ocean is intentionally static/opaque to avoid transparent water artifacts.
   }
 
   function makeBrushRing() {
@@ -859,7 +1117,9 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const u = clamp(hit.uv.x, 0, 1);
     const v = clamp(hit.uv.y, 0, 1);
     const maxH = Number(propsRef.current.maxHeightM || 500);
-    const seaNorm = Number(propsRef.current.seaLevelM || 0) / Math.max(1, maxH);
+    const world = propsRef.current.worldSettings || {};
+    const worldMaxH = maxH * getIslandHorizonScale(world);
+    const seaNorm = Number(propsRef.current.seaLevelM || 0) / Math.max(1, worldMaxH);
     const col = Math.round(u * (s.cols - 1));
     const row = Math.round((1 - v) * (s.rows - 1));
     if (isUnderwaterAt(s, row, col, seaNorm)) return;
@@ -872,7 +1132,9 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const material = current.selectedMaterial || 'grass';
     if (material === 'water') return;
     const maxH = Number(current.maxHeightM || 500);
-    const seaNorm = Number(current.seaLevelM || 0) / Math.max(1, maxH);
+    const world = current.worldSettings || {};
+    const worldMaxH = maxH * getIslandHorizonScale(world);
+    const seaNorm = Number(current.seaLevelM || 0) / Math.max(1, worldMaxH);
     if (isUnderwaterAt(s, row, col, seaNorm)) return;
     const pat = s.patterns[material] || s.patterns.grass;
     const img = pat?.img || pat;
@@ -908,7 +1170,9 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const sizePx = Number(currentBrush.size || 28) / 1024 * Math.max(rows, cols);
     const strength = Number(currentBrush.strength || 0.45) * 0.018;
     const maxH = Number(current.maxHeightM || 500);
-    const target = Number(currentBrush.flattenM || 10) / maxH;
+    const world = current.worldSettings || {};
+    const worldMaxH = maxH * getIslandHorizonScale(world);
+    const target = Number(currentBrush.flattenM || 10) / Math.max(1, worldMaxH);
     const radius = Math.max(1, sizePx);
     const r0 = Math.max(0, Math.floor(r - radius)), r1 = Math.min(rows - 1, Math.ceil(r + radius));
     const c0 = Math.max(0, Math.floor(col - radius)), c1 = Math.min(cols - 1, Math.ceil(col + radius));
@@ -930,8 +1194,12 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     updateGeometryHeights(s);
   }
   function updateGeometryHeights(s) {
-    const pos = s.geometry.attributes.position.array, maxH = Number(propsRef.current.maxHeightM || 500);
-    for (let i = 0; i < s.heights.length; i++) pos[i * 3 + 1] = s.heights[i] * maxH;
+    const pos = s.geometry.attributes.position.array;
+    const maxH = Number(propsRef.current.maxHeightM || 500);
+    const world = propsRef.current.worldSettings || {};
+    for (let i = 0; i < s.heights.length; i++) {
+      pos[i * 3 + 1] = elevationMetersFromNormalized(s.heights[i], maxH, world);
+    }
     s.geometry.attributes.position.needsUpdate = true;
     s.geometry.computeVertexNormals();
     renderVegetationClumps(s);
@@ -941,7 +1209,11 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const { width, depth } = getWorldDims(s.rows, s.cols, propsRef.current.worldSettings || {});
     const u = clamp(x / width + 0.5, 0, 1), v = clamp(z / depth + 0.5, 0, 1);
     const col = clamp(Math.round(u * (s.cols - 1)), 0, s.cols - 1), row = clamp(Math.round(v * (s.rows - 1)), 0, s.rows - 1);
-    return (s.heights[row * s.cols + col] || 0) * Number(propsRef.current.maxHeightM || 500);
+    return elevationMetersFromNormalized(
+      s.heights[row * s.cols + col] || 0,
+      Number(propsRef.current.maxHeightM || 500),
+      propsRef.current.worldSettings || {},
+    );
   }
 
   function renderVegetationClumps(s) {
@@ -961,14 +1233,18 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const density = clamp(Number(settings.treeDensity ?? settings.density ?? 0.58), 0, 1);
     if (density <= 0.02) return;
     const maxCount = Math.max(50, Math.round(Number(settings.treeCountMax ?? settings.maxCount ?? 1400)));
-    const spacing = Math.max(2, Math.round(Number(settings.treeSpacing ?? settings.spacing ?? 9)));
+    const world = propsRef.current.worldSettings || {};
+    const spacingFromM = meshSpacingCells(world, s.rows, s.cols);
+    const spacing = Math.max(2, spacingFromM || Math.round(Number(settings.treeSpacing ?? settings.spacing ?? 9)));
     const maxSlope = Number(settings.forestSlopeFade ?? settings.maxSlopeDeg ?? 36);
+    const wallSlopeStart = Number(settings.wallTreeSlopeStart ?? 42);
     const minNorm = Number(settings.minHeightNorm ?? 0.035);
     const minHm = Number(settings.treeMinHeightM ?? settings.minHeightM ?? 5);
     const maxH = Number(propsRef.current.maxHeightM || 500);
     const seed = Math.round(Number(settings.treeSeed ?? settings.seed ?? 42));
-    const scaleMin = Number(settings.scaleMin ?? 3.5);
-    const scaleMax = Number(settings.scaleMax ?? 14);
+    const featureScale = Math.max(0.25, Number(world.featureScale ?? 1));
+    const scaleMin = Number(settings.scaleMin ?? 3.5) * featureScale;
+    const scaleMax = Number(settings.scaleMax ?? 14) * featureScale;
     const carpetLayers = Math.max(1, Math.round(Number(settings.carpetLayers ?? 2)));
     const { width, depth } = getWorldDims(s.rows, s.cols, propsRef.current.worldSettings || {});
     const group = new THREE.Group();
@@ -990,39 +1266,61 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     });
     const canopyGeo = new THREE.ConeGeometry(1, 1.5, 5);
     const accentGeo = new THREE.ConeGeometry(1, 1.1, 4);
+    const canopyMatrices = [];
+    const accentMatrices = [];
+    const dummy = new THREE.Object3D();
     let placed = 0;
     for (let layer = 0; layer < carpetLayers && placed < maxCount; layer++) {
-      const layerOffset = layer * 0.45;
       const layerSpacing = Math.max(2, spacing - layer);
       for (let r = 2; r < s.rows - 2 && placed < maxCount; r += layerSpacing) {
         for (let c = 2; c < s.cols - 2 && placed < maxCount; c += layerSpacing) {
           const h = heightAt(s, r, c);
           const slope = slopeAt(s, r, c);
-          if (h < minNorm || h * maxH < minHm || slope > maxSlope) continue;
+          if (h < minNorm || elevationMetersFromNormalized(h, maxH, world) < minHm || slope > maxSlope) continue;
           const n = fbm(r / 2.8 + layer * 17, c / 2.8 + layer * 11, seed + layer * 31);
-          if (n > density + layer * 0.06) continue;
-          const x = (c / (s.cols - 1) - 0.5) * width + layerOffset;
-          const z = (r / (s.rows - 1) - 0.5) * depth + layerOffset;
-          const y = h * maxH;
+          const slopePenalty = 1 - smoothstep(wallSlopeStart, maxSlope, slope) * 0.52;
+          const localDensity = density * slopePenalty;
+          if (n > localDensity + layer * 0.06) continue;
+          const cellW = width / Math.max(1, s.cols - 1);
+          const cellD = depth / Math.max(1, s.rows - 1);
+          const jitterX = (hashNoise(r, c, seed + layer * 101) - 0.5) * cellW * layerSpacing * 0.82;
+          const jitterZ = (hashNoise(c, r, seed + layer * 151) - 0.5) * cellD * layerSpacing * 0.82;
+          const x = (c / (s.cols - 1) - 0.5) * width + jitterX;
+          const z = (r / (s.rows - 1) - 0.5) * depth + jitterZ;
+          const y = elevationMetersFromNormalized(h, maxH, world);
           const canopyScale = scaleMin + (1 - n) * (scaleMax - scaleMin) * (layer === 0 ? 1 : 0.65);
-          const canopy = new THREE.Mesh(canopyGeo, canopyMat);
-          canopy.position.set(x, y + canopyScale * 0.38, z);
-          canopy.scale.set(canopyScale * 1.05, canopyScale, canopyScale);
-          canopy.castShadow = layer === 0;
-          canopy.receiveShadow = true;
-          group.add(canopy);
+          dummy.position.set(x, y + canopyScale * 0.38, z);
+          dummy.rotation.set(0, hashNoise(r, c, seed + 9) * Math.PI * 2, 0);
+          dummy.scale.set(canopyScale * (0.86 + hashNoise(r, c, seed + 19) * 0.34), canopyScale * (slope > wallSlopeStart ? 0.86 : 1), canopyScale * (0.86 + hashNoise(c, r, seed + 29) * 0.34));
+          dummy.updateMatrix();
+          canopyMatrices.push(dummy.matrix.clone());
           placed += 1;
           if (n < 0.5 && placed < maxCount) {
-            const accent = new THREE.Mesh(accentGeo, accentMat);
-            accent.position.set(x + canopyScale * 0.15, y + canopyScale * 0.62, z + canopyScale * 0.1);
-            accent.scale.set(canopyScale * 0.5, canopyScale * 0.62, canopyScale * 0.48);
-            accent.castShadow = false;
-            accent.receiveShadow = true;
-            group.add(accent);
+            dummy.position.set(x + canopyScale * 0.15, y + canopyScale * 0.62, z + canopyScale * 0.1);
+            dummy.rotation.set(0, hashNoise(r, c, seed + 39) * Math.PI * 2, 0);
+            dummy.scale.set(canopyScale * 0.5, canopyScale * 0.62, canopyScale * 0.48);
+            dummy.updateMatrix();
+            accentMatrices.push(dummy.matrix.clone());
             placed += 1;
           }
         }
       }
+    }
+    if (canopyMatrices.length) {
+      const canopyBatch = new THREE.InstancedMesh(canopyGeo, canopyMat, canopyMatrices.length);
+      canopyMatrices.forEach((matrix, index) => canopyBatch.setMatrixAt(index, matrix));
+      canopyBatch.instanceMatrix.needsUpdate = true;
+      canopyBatch.castShadow = true;
+      canopyBatch.receiveShadow = true;
+      group.add(canopyBatch);
+    }
+    if (accentMatrices.length) {
+      const accentBatch = new THREE.InstancedMesh(accentGeo, accentMat, accentMatrices.length);
+      accentMatrices.forEach((matrix, index) => accentBatch.setMatrixAt(index, matrix));
+      accentBatch.instanceMatrix.needsUpdate = true;
+      accentBatch.castShadow = false;
+      accentBatch.receiveShadow = true;
+      group.add(accentBatch);
     }
     s.vegetationGroup = group;
     s.scene.add(group);

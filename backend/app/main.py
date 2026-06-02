@@ -19,6 +19,7 @@ from .image_utils import (
     read_upload_image,
     resize_to_match,
 )
+from .island_export import build_game_island_export, build_web_island_export, derived_maps_payload
 from .mesh_export import export_mesh_bytes, height_to_mesh
 from .layers import analyze_overlay_layer
 from .terrain import bake_water_layer, generate_heightmap_from_colors, parse_samples, preprocess_map_for_height, quantize_dominant_colors
@@ -109,10 +110,25 @@ async def create_heightmap(
         }
 
         if response_format == "zip":
+            manifest = {
+                "format": "island-dreamforge-export",
+                "schemaVersion": 1,
+                "version": 1,
+                "profile": "heightmap-stage",
+                "createdBy": "Island Dreamforge",
+                "units": "meters",
+                "world": {"maxHeightM": max_height_m, "seaLevelM": float(opts.get("seaLevelM", 0.0))},
+                "files": {
+                    "heightmap16": "heightmap_16bit.png",
+                    "preview8": "heightmap_preview_8bit.png",
+                    "recipe": "height_recipe.json",
+                },
+            }
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 height_buf = io.BytesIO(); height16.save(height_buf, format="PNG")
                 prev_buf = io.BytesIO(); preview.save(prev_buf, format="PNG")
+                zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
                 zf.writestr("heightmap_16bit.png", height_buf.getvalue())
                 zf.writestr("heightmap_preview_8bit.png", prev_buf.getvalue())
                 zf.writestr("height_recipe.json", json.dumps(recipe, indent=2))
@@ -164,11 +180,27 @@ async def bake_water(
         metadata["waterMaskSize"] = [int(water_mask.shape[1]), int(water_mask.shape[0])]
 
         if response_format == "zip":
+            manifest = {
+                "format": "island-dreamforge-export",
+                "schemaVersion": 1,
+                "version": 1,
+                "profile": "water-bake-stage",
+                "createdBy": "Island Dreamforge",
+                "units": "meters",
+                "world": {"maxHeightM": max_height_m, "seaLevelM": float(metadata.get("seaLevelM", opts.get("seaLevelM", 0.0)))},
+                "files": {
+                    "heightmap16": "heightmap_water_baked_16bit.png",
+                    "preview8": "heightmap_water_baked_preview_8bit.png",
+                    "waterMask": "water_mask.png",
+                    "recipe": "water_bake_recipe.json",
+                },
+            }
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 baked_buf = io.BytesIO(); baked16.save(baked_buf, format="PNG")
                 prev_buf = io.BytesIO(); preview.save(prev_buf, format="PNG")
                 mask_buf = io.BytesIO(); mask_png.save(mask_buf, format="PNG")
+                zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
                 zf.writestr("heightmap_water_baked_16bit.png", baked_buf.getvalue())
                 zf.writestr("heightmap_water_baked_preview_8bit.png", prev_buf.getvalue())
                 zf.writestr("water_mask.png", mask_buf.getvalue())
@@ -242,6 +274,85 @@ async def export_mesh(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/water-disc-preview")
+async def water_disc_preview(options: str = Form("{}")) -> Dict[str, Any]:
+    """Shape-agnostic water editor preview (disc + center sphere). No heightmap."""
+    opts = _json_field(options, {})
+    try:
+        from .bathymetry import generate_water_disc_preview
+        from .island_export import _rgb_png
+
+        data = generate_water_disc_preview(opts)
+        ocean_r = float(opts.get("oceanRadiusM", 850.0) or 850.0)
+        sphere_r = float(
+            opts.get("previewSphereRadiusM", opts.get("waterPreviewSphereRadiusM", 120.0)) or 120.0
+        )
+        return {
+            "waterColor": image_to_data_url(_rgb_png(data["water_color_rgb"])),
+            "oceanRadiusM": ocean_r,
+            "oceanDiameterM": ocean_r * 2.0,
+            "previewSphereRadiusM": min(max(8.0, sphere_r), max(8.0, ocean_r - 20.0)),
+            "mode": "disc_sphere",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/island-derived-maps")
+async def island_derived_maps(
+    heightmap: UploadFile = File(...),
+    options: str = Form("{}"),
+) -> Dict[str, Any]:
+    opts = _json_field(options, {})
+    max_height_m = float(opts.get("maxHeightM", 1200.0))
+    try:
+        h_img = read_upload_image(await heightmap.read(), "I;16")
+        height = image_to_height_m(h_img, max_height_m)
+        return derived_maps_payload(height, opts)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/export-web-island")
+async def export_web_island(
+    heightmap: UploadFile = File(...),
+    options: str = Form("{}"),
+) -> StreamingResponse:
+    opts = _json_field(options, {})
+    max_height_m = float(opts.get("maxHeightM", 1200.0))
+    try:
+        h_img = read_upload_image(await heightmap.read(), "I;16")
+        height = image_to_height_m(h_img, max_height_m)
+        data = build_web_island_export(height, opts)
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=web_export.zip"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/export-game-island")
+async def export_game_island(
+    heightmap: UploadFile = File(...),
+    options: str = Form("{}"),
+) -> StreamingResponse:
+    opts = _json_field(options, {})
+    max_height_m = float(opts.get("maxHeightM", 1200.0))
+    try:
+        h_img = read_upload_image(await heightmap.read(), "I;16")
+        height = image_to_height_m(h_img, max_height_m)
+        data = build_game_island_export(height, opts)
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=game_export.zip"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/export-project")
 async def export_project(
     heightmap: UploadFile = File(...),
@@ -268,6 +379,35 @@ async def export_project(
         stl, _, _ = export_mesh_bytes(mesh, "stl")
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            manifest = {
+                "format": "island-dreamforge-export",
+                "schemaVersion": 1,
+                "version": 1,
+                "profile": "authoring-project",
+                "createdBy": "Island Dreamforge",
+                "units": "meters",
+                "world": {
+                    "maxHeightM": max_height_m,
+                    "widthM": float(opts.get("widthM", 1480.0)),
+                    "depthM": float(opts.get("depthM", 1086.0)),
+                    "verticalExaggeration": float(opts.get("verticalScale", 1.0)),
+                },
+                "files": {
+                    "height": "maps/final_heightmap_16bit.png",
+                    "recipe": "project_recipe.json",
+                    "options": "export_options.json",
+                    "glb": "models/island_terrain.glb",
+                    "obj": "models/island_terrain.obj",
+                    "stl": "models/island_terrain.stl",
+                },
+            }
+            if tex_bytes:
+                manifest["files"]["texture"] = "maps/painted_texture.png"
+            if normal_bytes:
+                manifest["files"]["normal"] = "maps/normal_map.png"
+            if water_bytes:
+                manifest["files"]["waterMask"] = "maps/water_mask.png"
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
             zf.writestr("maps/final_heightmap_16bit.png", height_bytes)
             if tex_bytes:
                 zf.writestr("maps/painted_texture.png", tex_bytes)
