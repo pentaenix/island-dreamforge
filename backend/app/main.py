@@ -342,13 +342,28 @@ async def island_derived_maps(
 async def export_web_island(
     heightmap: UploadFile = File(...),
     options: str = Form("{}"),
+    preview_scene: Optional[UploadFile] = File(None),
+    terrain_texture: Optional[UploadFile] = File(None),
+    ocean_bands: Optional[UploadFile] = File(None),
+    ocean_foam: Optional[UploadFile] = File(None),
 ) -> StreamingResponse:
     opts = _json_field(options, {})
     max_height_m = float(opts.get("maxHeightM", 1200.0))
     try:
         h_img = read_upload_image(await heightmap.read(), "I;16")
         height = image_to_height_m(h_img, max_height_m)
-        data = build_web_island_export(height, opts)
+        preview_glb = await preview_scene.read() if preview_scene else None
+        terrain_png = await terrain_texture.read() if terrain_texture else None
+        bands_png = await ocean_bands.read() if ocean_bands else None
+        foam_png = await ocean_foam.read() if ocean_foam else None
+        data = build_web_island_export(
+            height,
+            opts,
+            preview_glb=preview_glb or None,
+            terrain_texture_png=terrain_png or None,
+            ocean_bands_png=bands_png or None,
+            ocean_foam_png=foam_png or None,
+        )
         return StreamingResponse(
             io.BytesIO(data),
             media_type="application/zip",
@@ -362,13 +377,28 @@ async def export_web_island(
 async def export_game_island(
     heightmap: UploadFile = File(...),
     options: str = Form("{}"),
+    preview_scene: Optional[UploadFile] = File(None),
+    terrain_texture: Optional[UploadFile] = File(None),
+    ocean_bands: Optional[UploadFile] = File(None),
+    ocean_foam: Optional[UploadFile] = File(None),
 ) -> StreamingResponse:
     opts = _json_field(options, {})
     max_height_m = float(opts.get("maxHeightM", 1200.0))
     try:
         h_img = read_upload_image(await heightmap.read(), "I;16")
         height = image_to_height_m(h_img, max_height_m)
-        data = build_game_island_export(height, opts)
+        preview_glb = await preview_scene.read() if preview_scene else None
+        terrain_png = await terrain_texture.read() if terrain_texture else None
+        bands_png = await ocean_bands.read() if ocean_bands else None
+        foam_png = await ocean_foam.read() if ocean_foam else None
+        data = build_game_island_export(
+            height,
+            opts,
+            preview_glb=preview_glb or None,
+            terrain_texture_png=terrain_png or None,
+            ocean_bands_png=bands_png or None,
+            ocean_foam_png=foam_png or None,
+        )
         return StreamingResponse(
             io.BytesIO(data),
             media_type="application/zip",
@@ -384,6 +414,9 @@ async def export_project(
     texture: Optional[UploadFile] = File(None),
     normal_map: Optional[UploadFile] = File(None),
     water_mask: Optional[UploadFile] = File(None),
+    preview_scene: Optional[UploadFile] = File(None),
+    ocean_bands: Optional[UploadFile] = File(None),
+    ocean_foam: Optional[UploadFile] = File(None),
     recipe: str = Form("{}"),
     options: str = Form("{}"),
 ) -> StreamingResponse:
@@ -395,11 +428,18 @@ async def export_project(
         tex_bytes = await texture.read() if texture else None
         normal_bytes = await normal_map.read() if normal_map else None
         water_bytes = await water_mask.read() if water_mask else None
+        preview_glb = await preview_scene.read() if preview_scene else None
+        bands_png = await ocean_bands.read() if ocean_bands else None
+        foam_png = await ocean_foam.read() if ocean_foam else None
         h_img = read_upload_image(height_bytes, "I;16")
         height = image_to_height_m(h_img, max_height_m)
         tex_img = read_upload_image(tex_bytes, "RGB") if tex_bytes else None
+        if preview_glb:
+            glb = preview_glb
+        else:
+            mesh = height_to_mesh(height, opts, texture=tex_img)
+            glb, _, _ = export_mesh_bytes(mesh, "glb")
         mesh = height_to_mesh(height, opts, texture=tex_img)
-        glb, _, _ = export_mesh_bytes(mesh, "glb")
         obj, _, _ = export_mesh_bytes(mesh, "obj")
         stl, _, _ = export_mesh_bytes(mesh, "stl")
         buffer = io.BytesIO()
@@ -421,17 +461,24 @@ async def export_project(
                     "height": "maps/final_heightmap_16bit.png",
                     "recipe": "project_recipe.json",
                     "options": "export_options.json",
-                    "glb": "models/island_terrain.glb",
+                    "glb": "models/island_preview.glb" if preview_glb else "models/island_terrain.glb",
                     "obj": "models/island_terrain.obj",
                     "stl": "models/island_terrain.stl",
                 },
             }
+            if preview_glb:
+                manifest["sceneSource"] = "viewport_preview_unlit"
+                manifest["sceneNotes"] = "GLB matches the 3D preview (terrain + circular ocean). No skybox or lighting."
             if tex_bytes:
                 manifest["files"]["texture"] = "maps/painted_texture.png"
             if normal_bytes:
                 manifest["files"]["normal"] = "maps/normal_map.png"
             if water_bytes:
                 manifest["files"]["waterMask"] = "maps/water_mask.png"
+            if bands_png:
+                manifest["files"]["oceanBands"] = "textures/ocean_bands.png"
+            if foam_png:
+                manifest["files"]["oceanFoam"] = "textures/ocean_foam.png"
             zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
             zf.writestr("maps/final_heightmap_16bit.png", height_bytes)
             if tex_bytes:
@@ -440,7 +487,11 @@ async def export_project(
                 zf.writestr("maps/normal_map.png", normal_bytes)
             if water_bytes:
                 zf.writestr("maps/water_mask.png", water_bytes)
-            zf.writestr("models/island_terrain.glb", glb)
+            if bands_png:
+                zf.writestr("textures/ocean_bands.png", bands_png)
+            if foam_png:
+                zf.writestr("textures/ocean_foam.png", foam_png)
+            zf.writestr(manifest["files"]["glb"], glb)
             zf.writestr("models/island_terrain.obj", obj)
             zf.writestr("models/island_terrain.stl", stl)
             zf.writestr("project_recipe.json", json.dumps(_json_field(recipe, {}), indent=2))

@@ -7,6 +7,7 @@ import {
   clampMeshResolution,
   elevationMetersFromNormalized,
   getIslandHorizonScale,
+  getOceanDiscRadiusM,
   getWorldMaxHeightM,
   meshSpacingCells,
 } from './worldSettings.js';
@@ -14,11 +15,14 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { applyDioramaLighting, createDioramaLighting, dioramaLightingFromSettings } from './dioramaLighting.js';
 import { tintSampledMaterial } from './materialColors.js';
-import { createWaterStack3d, disposeWaterStack } from './waterLayers3d.js';
+import { createWaterStack3d, disposeWaterStack, applyOceanLayerHeights } from './waterLayers3d.js';
+import { updateFoamReflectionUniforms } from './waterFoamReflection.js';
 import { isLandVertexM } from './waterMaskFromHeights.js';
+import { exportViewportSceneGlb } from './viewportSceneExport.js';
+import { dataUrlToBlob } from './api.js';
 
 const SKYBOX_CUBE_PATH = '/island-assets/skybox/sky_03_2k/sky_03_cubemap_2k';
-const SKYBOX_MAX_DISTANCE = 5800;
+const SKYBOX_MAX_DISTANCE = 12000;
 const VIEWPORT_CONFIG_URL = '/viewport_config.json';
 
 const DEFAULT_VIEWPORT_CONFIG = {
@@ -273,12 +277,51 @@ function terrainRules(s, textureSettings = {}) {
   return { ...base, ...textureSettings };
 }
 
-function applyOrbitLimits(controls, rows = 64, cols = 64, world = {}) {
-  if (!controls) return;
+function getSceneBounds(rows, cols, world, oceanSettings, maxHeightM) {
   const dims = getWorldDims(rows, cols, world);
-  const span = Math.max(dims.width, dims.depth);
-  controls.minDistance = Math.max(70, span * 0.07);
-  controls.maxDistance = Math.min(SKYBOX_MAX_DISTANCE, Math.max(span * 1.75, 1100));
+  const mapSizePx = { width: cols, height: rows };
+  const discR = getOceanDiscRadiusM(world, mapSizePx, oceanSettings);
+  const sceneSpan = Math.max(dims.width, dims.depth, discR * 2);
+  const maxH = Number(maxHeightM || 500) * getIslandHorizonScale(world);
+  const boundsRadius = Math.hypot(sceneSpan * 0.5, sceneSpan * 0.5, maxH + 12);
+  return { sceneSpan, boundsRadius };
+}
+
+function applyCameraClipPlanes(camera, controls, bounds) {
+  if (!camera || !controls || !bounds) return;
+  const dist = camera.position.distanceTo(controls.target);
+  const { boundsRadius } = bounds;
+  const maxDist = controls.maxDistance || dist;
+
+  // Far plane must exceed orbit distance + scene radius or edges clip when zoomed out.
+  camera.far = Math.max(maxDist + boundsRadius * 1.45, dist + boundsRadius * 1.85, 8000);
+  // Near plane scales with distance so close-ups don't clip nearby slopes.
+  camera.near = Math.max(0.04, Math.min(1.25, dist / 2600));
+
+  const maxRatio = 4e5;
+  if (camera.far / camera.near > maxRatio) {
+    camera.near = camera.far / maxRatio;
+  }
+  camera.updateProjectionMatrix();
+}
+
+function applyViewportCameraLimits(camera, controls, rows, cols, world, oceanSettings, maxHeightM) {
+  if (!controls) return null;
+  const bounds = getSceneBounds(rows, cols, world, oceanSettings, maxHeightM);
+  controls.minDistance = Math.max(18, bounds.sceneSpan * 0.018);
+  controls.maxDistance = Math.min(SKYBOX_MAX_DISTANCE, Math.max(bounds.sceneSpan * 3.75, 1600));
+  applyCameraClipPlanes(camera, controls, bounds);
+  return bounds;
+}
+
+function clampOrbitDistance(camera, controls) {
+  if (!camera || !controls) return;
+  const dist = camera.position.distanceTo(controls.target);
+  if (dist > controls.maxDistance) {
+    camera.position.subVectors(camera.position, controls.target).normalize().multiplyScalar(controls.maxDistance).add(controls.target);
+  } else if (dist < controls.minDistance) {
+    camera.position.subVectors(camera.position, controls.target).normalize().multiplyScalar(controls.minDistance).add(controls.target);
+  }
 }
 
 /** Low, wide framing like the resort reference shot. */
@@ -290,7 +333,15 @@ function frameCinematicCamera(s, props = {}) {
   const y = Math.max(90, maxH * 0.38);
   s.camera.position.set(dist * 0.5, y, dist * 1.02);
   s.controls.target.set(0, Math.max(16, maxH * 0.12), 0);
-  applyOrbitLimits(s.controls, s.rows, s.cols, props.worldSettings);
+  s.sceneBounds = applyViewportCameraLimits(
+    s.camera,
+    s.controls,
+    s.rows,
+    s.cols,
+    props.worldSettings,
+    props.oceanSettings,
+    props.maxHeightM,
+  );
   s.controls.update();
 }
 
@@ -341,6 +392,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     raycaster: new THREE.Raycaster(), pointer: new THREE.Vector2(),
     water: null, waterNormals: null, skybox: null, viewportConfig: null, seafloor: null, coastlineSkirt: null,
     patternTextures: {}, overlayGroup: null, vegetationGroup: null, brushRing: null,
+    sceneBounds: null,
     lastPointer: { x: 0, y: 0, hit: false },
   });
 
@@ -379,6 +431,22 @@ const TerrainViewport = forwardRef(function TerrainViewport({
         foam: w.userData?.foamTextureUrl || '',
       };
     },
+    async exportPreviewGlb() {
+      const s = stateRef.current;
+      if (!s.mesh) return null;
+      return exportViewportSceneGlb({
+        mesh: s.mesh,
+        water: s.water,
+      });
+    },
+    async getWaterTextureBlobs() {
+      const urls = this.getWaterTextureUrls();
+      if (!urls) return null;
+      const out = {};
+      if (urls.bands) out.bands = await dataUrlToBlob(urls.bands);
+      if (urls.foam) out.foam = await dataUrlToBlob(urls.foam);
+      return out;
+    },
     regenerateTrees() {
       renderVegetationClumps(stateRef.current);
     },
@@ -416,7 +484,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       }
       s.dioramaLights = setupIslandLighting(scene, propsRef.current.textureSettings || {}, s.viewportConfig);
 
-      const camera = new THREE.PerspectiveCamera(50, mount.clientWidth / Math.max(1, mount.clientHeight), 0.5, 12000);
+      const camera = new THREE.PerspectiveCamera(50, mount.clientWidth / Math.max(1, mount.clientHeight), 0.04, 25000);
       camera.position.set(820, 280, 1180);
 
       const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
@@ -436,14 +504,25 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       controls.target.set(0, 110, 0);
       controls.maxPolarAngle = Math.PI * 0.495;
       controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-      applyOrbitLimits(controls, 64, 64, propsRef.current.worldSettings);
+      s.sceneBounds = applyViewportCameraLimits(
+        camera,
+        controls,
+        64,
+        64,
+        propsRef.current.worldSettings,
+        propsRef.current.oceanSettings,
+        propsRef.current.maxHeightM,
+      );
       controls.addEventListener('change', () => {
-        const dist = camera.position.distanceTo(controls.target);
-        if (dist > controls.maxDistance) {
-          camera.position.subVectors(camera.position, controls.target).normalize().multiplyScalar(controls.maxDistance).add(controls.target);
-        } else if (dist < controls.minDistance) {
-          camera.position.subVectors(camera.position, controls.target).normalize().multiplyScalar(controls.minDistance).add(controls.target);
-        }
+        clampOrbitDistance(camera, controls);
+        const bounds = s.sceneBounds || getSceneBounds(
+          s.rows || 64,
+          s.cols || 64,
+          propsRef.current.worldSettings,
+          propsRef.current.oceanSettings,
+          propsRef.current.maxHeightM,
+        );
+        applyCameraClipPlanes(camera, controls, bounds);
       });
       controls.update();
 
@@ -576,11 +655,38 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     oceanSettings?.waterBandStepM,
     oceanSettings?.waterBandStepIncreaseM,
     oceanSettings?.waterBandStepGrowthPower,
+    oceanSettings?.waterReflectionEnabled,
+    oceanSettings?.waterReflectionResolution,
     foamMaskUrl,
     waterMaskUrl,
     waterColorUrl,
     shoreDistanceUrl,
     shoreDistanceMaxM,
+  ]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.water) return;
+    applyOceanLayerHeights(s.water, oceanSettings);
+  }, [
+    oceanSettings?.oceanBandsOffsetM,
+    oceanSettings?.oceanFoamOffsetM,
+    oceanSettings?.oceanReflectionOffsetM,
+  ]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.water || oceanSettings?.waterReflectionEnabled !== true) return;
+    s.water.traverse((child) => {
+      if (child.userData?.isOceanReflection) {
+        updateFoamReflectionUniforms(child, oceanSettings);
+      }
+    });
+  }, [
+    oceanSettings?.waterReflectionEnabled,
+    oceanSettings?.waterReflectionStrength,
+    oceanSettings?.waterReflectionDistortion,
+    oceanSettings?.waterReflectionDistortionScale,
+    oceanSettings?.waterReflectionTint,
+    oceanSettings?.waterNoiseScaleM,
   ]);
   useEffect(() => { const s = stateRef.current; if (s.scene && s.mesh) renderOverlayObjects(s, layers || []); }, [layers, heightUrl, maxHeightM]);
 
@@ -687,7 +793,15 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       s.scene.add(water);
     }
     s.coastlineSkirt = null;
-    applyOrbitLimits(s.controls, rows, cols, propsRef.current.worldSettings);
+    s.sceneBounds = applyViewportCameraLimits(
+      s.camera,
+      s.controls,
+      rows,
+      cols,
+      propsRef.current.worldSettings,
+      propsRef.current.oceanSettings,
+      propsRef.current.maxHeightM,
+    );
     renderOverlayObjects(s, layers || []);
     renderVegetationClumps(s);
     if (s.controls && s.camera) {
@@ -711,6 +825,15 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     );
     s.water = water;
     if (water) s.scene.add(water);
+    s.sceneBounds = applyViewportCameraLimits(
+      s.camera,
+      s.controls,
+      s.rows,
+      s.cols,
+      propsRef.current.worldSettings,
+      propsRef.current.oceanSettings,
+      propsRef.current.maxHeightM,
+    );
   }
 
   function mapLandPredicate(heights, maxH, islandMask, seaLevel, world = {}) {

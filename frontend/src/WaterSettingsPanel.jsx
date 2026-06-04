@@ -162,12 +162,12 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
       <Slider label="Edge soften" value={settings.bathymetrySmoothPx} min={0} max={4} step={1} suffix="px" onChange={(v) => patch({ bathymetrySmoothPx: v })} />
 
       <h4>Surface (foam & waves)</h4>
-      <p className="small muted">Foam and wave sparkle sit on top of depth color — they do not change the palette bands.</p>
+      <p className="small muted">Scattered wave crests on open water — not a shore surf line. Depth bands are unchanged.</p>
       <Slider label="Wave noise" value={settings.waterNoiseStrength ?? 0.1} min={0} max={0.35} step={0.01} onChange={(v) => patch({ waterNoiseStrength: v })} />
       <Slider label="Wave scale" value={settings.waterNoiseScaleM ?? 85} min={15} max={400} step={5} suffix="m" onChange={(v) => patch({ waterNoiseScaleM: v })} />
       <Slider label="Reef variation" value={settings.reefNoiseStrength ?? 0.08} min={0} max={0.35} step={0.01} onChange={(v) => patch({ reefNoiseStrength: v })} />
       <Slider label="Coastal variation" value={settings.coastalVariationStrength ?? 0.15} min={0} max={0.8} step={0.01} onChange={(v) => patch({ coastalVariationStrength: v })} />
-      <Slider label="Foam width" value={settings.foamWidthM ?? 12} min={0} max={48} step={1} suffix="m" onChange={(v) => patch({ foamWidthM: v })} />
+      <Slider label="Shore fade" value={settings.foamWidthM ?? 12} min={0} max={48} step={1} suffix="m" onChange={(v) => patch({ foamWidthM: v })} />
       <Slider label="Foam strength" value={settings.foamStrength ?? 0.2} min={0} max={0.6} step={0.01} onChange={(v) => patch({ foamStrength: v })} />
       <Slider
         label="Disc edge fade"
@@ -178,7 +178,94 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
         suffix="m"
         onChange={(v) => patch({ oceanFoamRimFadeM: v })}
       />
-      <p className="small muted">Fades foam and waves near the ocean circle edge so they do not stretch on the rim.</p>
+      <p className="small muted">Fades wave crests near the ocean circle edge. Shore fade suppresses crests right against the island.</p>
+
+      <h4>Layer heights (3D stack)</h4>
+      <p className="small muted">Distance above the deep ocean disc for each upper layer. The bottom disc stays fixed.</p>
+      <Slider
+        label="Bands layer"
+        value={settings.oceanBandsOffsetM ?? 1.35}
+        min={0.1}
+        max={12}
+        step={0.05}
+        suffix="m"
+        onChange={(v) => patch({ oceanBandsOffsetM: v })}
+      />
+      <Slider
+        label="Reflection layer"
+        value={settings.oceanReflectionOffsetM ?? 2.78}
+        min={0.1}
+        max={12}
+        step={0.05}
+        suffix="m"
+        onChange={(v) => patch({ oceanReflectionOffsetM: v })}
+      />
+      <Slider
+        label="Foam layer"
+        value={settings.oceanFoamOffsetM ?? 2.6}
+        min={0.1}
+        max={12}
+        step={0.05}
+        suffix="m"
+        onChange={(v) => patch({ oceanFoamOffsetM: v })}
+      />
+
+      <h4>Foam reflection (3D viewport)</h4>
+      <p className="small muted">Optional circular reflection disc just above the foam layer — matches the ocean circle, not the square foam plane. Viewport only; not in GLB export.</p>
+      <label className="checkline">
+        <input
+          type="checkbox"
+          checked={settings.waterReflectionEnabled === true}
+          onChange={(e) => patch({ waterReflectionEnabled: e.target.checked })}
+        />
+        Enable foam reflection
+      </label>
+      {settings.waterReflectionEnabled === true && (
+        <>
+          <Slider
+            label="Reflection strength"
+            value={settings.waterReflectionStrength ?? 0.38}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) => patch({ waterReflectionStrength: v })}
+          />
+          <Slider
+            label="Wave distortion"
+            value={settings.waterReflectionDistortion ?? 0.2}
+            min={0}
+            max={0.6}
+            step={0.01}
+            onChange={(v) => patch({ waterReflectionDistortion: v })}
+          />
+          <Slider
+            label="Distortion scale"
+            value={settings.waterReflectionDistortionScale > 0 ? settings.waterReflectionDistortionScale : (settings.waterNoiseScaleM ?? 85)}
+            min={15}
+            max={400}
+            step={5}
+            suffix="m"
+            onChange={(v) => patch({ waterReflectionDistortionScale: v })}
+          />
+          <Slider
+            label="Water tint"
+            value={settings.waterReflectionTint ?? 0.22}
+            min={0}
+            max={0.6}
+            step={0.01}
+            onChange={(v) => patch({ waterReflectionTint: v })}
+          />
+          <Slider
+            label="Reflection quality"
+            value={settings.waterReflectionResolution ?? 512}
+            min={256}
+            max={1024}
+            step={256}
+            suffix="px"
+            onChange={(v) => patch({ waterReflectionResolution: v })}
+          />
+        </>
+      )}
 
       <details>
         <summary>Export-only</summary>

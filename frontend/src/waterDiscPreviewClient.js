@@ -4,7 +4,7 @@ import {
   oceanDiscRimFade,
   sampleWaterColor,
 } from './waterPalette.js';
-import { applySurfaceOverlays } from './waterSurfaceComposite.js';
+import { applySurfaceOverlays, computeWaveCrestFoam } from './waterSurfaceComposite.js';
 import { getWaterDiscPreviewSpanM } from './worldSettings.js';
 
 function smoothstep(a, b, x) {
@@ -59,7 +59,6 @@ export function buildWaterDiscPreview(options = {}) {
   const reefStrength = Number(options.reefNoiseStrength ?? 0.08);
   const coastalVar = Number(options.coastalVariationStrength ?? 0.15);
   const foamWidth = Number(options.foamWidthM ?? 12);
-  const foamStrength = Number(options.foamStrength ?? 0.2);
   const bandSmooth = Number(options.waterBandSmoothness ?? options.waterColorSmoothness ?? 0.35);
 
   const size = 640;
@@ -131,12 +130,11 @@ export function buildWaterDiscPreview(options = {}) {
 
       const rimFadeM = Number(options.oceanFoamRimFadeM ?? 48);
       const rimFactor = oceanDiscRimFade(radial, oceanR, rimFadeM);
-      const foamT = 1 - smoothstep(Math.max(pixelM, foamWidth * 0.12), foamWidth, distM);
-      let foamMix = 0;
-      if (foamT > 0 && foamStrength > 0 && rimFactor > 0.02) {
-        const foamNoise = (valueNoiseWorld(x, z, Math.max(3, foamWidth * 0.5), seed + 71) + 1) * 0.5;
-        foamMix = foamT * foamStrength * (0.7 + 0.3 * foamNoise) * rimFactor;
-      }
+      const shoreFadeM = Math.max(0, foamWidth);
+      const shoreFactor = shoreFadeM <= 0
+        ? 1
+        : smoothstep(Math.max(pixelM, shoreFadeM * 0.05), shoreFadeM, distM);
+      const foamMix = computeWaveCrestFoam(x, z, options, rimFactor, shoreFactor);
       const fv = Math.round(Math.min(255, foamMix * 255));
       foamData[p] = fv;
       foamData[p + 1] = fv;

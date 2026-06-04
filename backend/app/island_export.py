@@ -192,6 +192,8 @@ def _metadata(data: Dict[str, Any]) -> Dict[str, Any]:
         },
         "ocean": {
             "radiusM": float(opts.get("oceanRadiusM")),
+            "discRadiusM": float(opts.get("oceanDiscRadiusM", opts.get("oceanRadiusM"))),
+            "discDiameterM": float(opts.get("oceanDiscDiameterM", opts.get("oceanDiscRadiusM", opts.get("oceanRadiusM")) * 2)),
             "maxDepthM": float(opts.get("maxOceanDepthM")),
             "waterBandStepM": float(opts.get("waterBandStepM", 12)),
             "waterBandStepIncreaseM": float(opts.get("waterBandStepIncreaseM", 16)),
@@ -293,7 +295,15 @@ def _simple_mesh_binary(mesh: trimesh.Trimesh, magic: bytes = b"IDFSKRT1") -> by
     return header + vertices.tobytes(order="C") + faces.reshape(-1).tobytes(order="C")
 
 
-def build_web_island_export(height_m: np.ndarray, options: Dict[str, Any] | None = None) -> bytes:
+def build_web_island_export(
+    height_m: np.ndarray,
+    options: Dict[str, Any] | None = None,
+    *,
+    preview_glb: Optional[bytes] = None,
+    terrain_texture_png: Optional[bytes] = None,
+    ocean_bands_png: Optional[bytes] = None,
+    ocean_foam_png: Optional[bytes] = None,
+) -> bytes:
     data = derive_island_data(height_m, options)
     opts = {**data["options"], "detailProfile": data["options"].get("webDetail", "web_export_high")}
     bathy = data["bathymetry"]
@@ -324,12 +334,29 @@ def build_web_island_export(height_m: np.ndarray, options: Dict[str, Any] | None
         "structures": "data/structures.json",
         "markers": "data/markers.json",
     }
+    if preview_glb:
+        files["scene"] = "scene/island_preview.glb"
+    if terrain_texture_png:
+        files["terrainAlbedo"] = "textures/terrain_albedo.png"
+    if ocean_bands_png:
+        files["oceanBands"] = "textures/ocean_bands.png"
+    if ocean_foam_png:
+        files["oceanFoam"] = "textures/ocean_foam.png"
     manifest = _manifest("web", data, files, package_name="web_export")
+    if preview_glb:
+        manifest["sceneSource"] = "viewport_preview_unlit"
+        manifest["sceneNotes"] = "GLB matches the 3D preview: terrain albedo + circular ocean (disc, bands, foam). No skybox or lighting."
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        zf.writestr(files["scene"], _scene_glb(meshes))
+        zf.writestr(files["scene"], preview_glb if preview_glb else _scene_glb(meshes))
+        if terrain_texture_png:
+            zf.writestr(files["terrainAlbedo"], terrain_texture_png)
+        if ocean_bands_png:
+            zf.writestr(files["oceanBands"], ocean_bands_png)
+        if ocean_foam_png:
+            zf.writestr(files["oceanFoam"], ocean_foam_png)
         zf.writestr(files["materialSplat"], _png_bytes(_rgba_png(mats["material_splat_rgba"])))
         zf.writestr(files["waterDepth"], _png_bytes(_u8_png(bathy["water_depth_norm"])))
         zf.writestr(files["bathymetry"], _png_bytes(_u8_png(bathy["bathymetry01"])))
@@ -356,7 +383,15 @@ def _detail_options(opts: Dict[str, Any], profile: str, profile_id: int, resolut
     return next_opts
 
 
-def build_game_island_export(height_m: np.ndarray, options: Dict[str, Any] | None = None) -> bytes:
+def build_game_island_export(
+    height_m: np.ndarray,
+    options: Dict[str, Any] | None = None,
+    *,
+    preview_glb: Optional[bytes] = None,
+    terrain_texture_png: Optional[bytes] = None,
+    ocean_bands_png: Optional[bytes] = None,
+    ocean_foam_png: Optional[bytes] = None,
+) -> bytes:
     data = derive_island_data(height_m, options)
     opts = data["options"]
     bathy = data["bathymetry"]
@@ -401,6 +436,14 @@ def build_game_island_export(height_m: np.ndarray, options: Dict[str, Any] | Non
         "markers": "game/marker_instances.json",
         "previewScene": "preview/island_game_preview.glb",
     }
+    if preview_glb:
+        files["previewScene"] = "preview/island_preview.glb"
+    if terrain_texture_png:
+        files["terrainAlbedo"] = "textures/terrain_albedo.png"
+    if ocean_bands_png:
+        files["oceanBands"] = "textures/ocean_bands.png"
+    if ocean_foam_png:
+        files["oceanFoam"] = "textures/ocean_foam.png"
     manifest = _manifest(
         "game",
         data,
@@ -413,6 +456,9 @@ def build_game_island_export(height_m: np.ndarray, options: Dict[str, Any] | Non
             }
         },
     )
+    if preview_glb:
+        manifest["sceneSource"] = "viewport_preview_unlit"
+        manifest["sceneNotes"] = "Preview GLB matches the 3D viewport (terrain + circular ocean). No skybox or lighting."
 
     collision = np.where(data["island_mask"], height_m, float(opts["seaLevelM"])).astype(np.float32)
     buffer = io.BytesIO()
@@ -437,7 +483,13 @@ def build_game_island_export(height_m: np.ndarray, options: Dict[str, Any] | Non
         zf.writestr(files["coastlineSkirt"], _simple_mesh_binary(skirt))
         zf.writestr(files["structures"], json.dumps({"version": 1, "instances": []}, indent=2))
         zf.writestr(files["markers"], json.dumps({"version": 1, "instances": []}, indent=2))
-        zf.writestr(files["previewScene"], _scene_glb(preview_meshes))
+        zf.writestr(files["previewScene"], preview_glb if preview_glb else _scene_glb(preview_meshes))
+        if terrain_texture_png:
+            zf.writestr(files["terrainAlbedo"], terrain_texture_png)
+        if ocean_bands_png:
+            zf.writestr(files["oceanBands"], ocean_bands_png)
+        if ocean_foam_png:
+            zf.writestr(files["oceanFoam"], ocean_foam_png)
         _assert_manifest_files(zf, manifest)
     return buffer.getvalue()
 

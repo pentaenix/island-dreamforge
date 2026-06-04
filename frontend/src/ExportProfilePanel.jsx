@@ -28,7 +28,7 @@ export default function ExportProfilePanel({
       <header>
         <div>
           <h3>Export Profiles</h3>
-          <p className="small muted">Generate real island data: masks, shoreline distance, seafloor, material maps, and web/game packages. Tune ocean colors in Stage 3 · Water.</p>
+          <p className="small muted">Generate real island data: masks, shoreline distance, seafloor, material maps, and web/game packages. When the 3D viewport is loaded, exports bundle the same preview scene (terrain + circular ocean) you see on screen.</p>
         </div>
       </header>
 

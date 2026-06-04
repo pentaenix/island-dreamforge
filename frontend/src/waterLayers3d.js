@@ -1,22 +1,49 @@
 /**
- * Three independent layers (bottom → top):
- * 1. Circle — solid deepest color (disc diameter slider only).
- * 2. Rectangle — island footprint, exported band map texture (0–1 UV, map-sized plane).
- * 3. Square — foam (disc diameter; separate from band map).
+ * Ocean stack (bottom → top):
+ * 1. Circle — solid deepest color (disc diameter).
+ * 2. Rectangle — depth band map (padded rect, disc-clipped).
+ * 3. Square — wave-crest foam.
+ * 4. Circle (optional) — reflection-only disc just above foam; viewport only.
  */
 
 import * as THREE from 'three';
 import { buildFoamLayerTextureUrl, buildWaterBandsMapUrl } from './waterSurfaceComposite.js';
+import { createOceanReflectionDiscMesh, isWaterReflectionEnabled } from './waterFoamReflection.js';
 import { defaultBandEdgesM, ISLAND_WATER_HEX } from './waterPalette.js';
 import { getOceanDiscRadiusM, getWorldDimsM } from './worldSettings.js';
 
 const DEEP_OCEAN_HEX = ISLAND_WATER_HEX[ISLAND_WATER_HEX.length - 1];
 
-export const OCEAN_LAYER_Y_M = {
-  deep: 0.3,
-  bands: 1.65,
-  foam: 2.9,
+/** Fixed Y for the bottom deep-ocean disc (local to the water group). */
+export const OCEAN_DEEP_Y_M = 0.3;
+
+export const DEFAULT_OCEAN_LAYER_OFFSETS_M = {
+  bands: 1.35,
+  foam: 2.6,
+  reflection: 2.78,
 };
+
+/** Local Y heights for each ocean stack layer (deep disc is fixed). */
+export function getOceanLayerHeightsM(ocean = {}) {
+  const deep = OCEAN_DEEP_Y_M;
+  return {
+    deep,
+    bands: deep + Math.max(0.05, Number(ocean.oceanBandsOffsetM ?? DEFAULT_OCEAN_LAYER_OFFSETS_M.bands)),
+    foam: deep + Math.max(0.05, Number(ocean.oceanFoamOffsetM ?? DEFAULT_OCEAN_LAYER_OFFSETS_M.foam)),
+    reflection: deep + Math.max(0.05, Number(ocean.oceanReflectionOffsetM ?? DEFAULT_OCEAN_LAYER_OFFSETS_M.reflection)),
+  };
+}
+
+export function applyOceanLayerHeights(waterGroup, ocean = {}) {
+  if (!waterGroup) return;
+  const h = getOceanLayerHeightsM(ocean);
+  waterGroup.traverse((child) => {
+    if (child.name === 'ocean-deep-disc') child.position.y = h.deep;
+    else if (child.name === 'ocean-bands-rect') child.position.y = h.bands;
+    else if (child.name === 'ocean-foam-square') child.position.y = h.foam;
+    else if (child.name === 'ocean-reflection-disc') child.position.y = h.reflection;
+  });
+}
 
 function layerMaterial(opts) {
   return new THREE.MeshBasicMaterial({
@@ -51,12 +78,17 @@ export function disposeWaterStack(water) {
   if (!water) return;
   water.traverse((child) => {
     if (!child.isMesh) return;
+    if (child.userData?.disposeReflection) {
+      child.userData.disposeReflection();
+    } else {
+      const mat = child.material;
+      if (mat) {
+        mat.map?.dispose();
+        mat.alphaMap?.dispose();
+        mat.dispose();
+      }
+    }
     child.geometry?.dispose();
-    const mat = child.material;
-    if (!mat) return;
-    mat.map?.dispose();
-    mat.alphaMap?.dispose();
-    mat.dispose();
   });
 }
 
@@ -89,6 +121,8 @@ export async function createWaterStack3d({
   group.userData.bandsTextureUrl = '';
   group.userData.foamTextureUrl = '';
 
+  const layerY = getOceanLayerHeightsM(ocean);
+
   const baseGeo = new THREE.CircleGeometry(discRadius, 128);
   const baseMat = new THREE.MeshBasicMaterial({
     color: new THREE.Color(DEEP_OCEAN_HEX),
@@ -98,16 +132,12 @@ export async function createWaterStack3d({
   });
   const baseMesh = new THREE.Mesh(baseGeo, baseMat);
   baseMesh.rotation.x = -Math.PI / 2;
-  baseMesh.position.y = OCEAN_LAYER_Y_M.deep;
+  baseMesh.position.y = layerY.deep;
   baseMesh.renderOrder = 0;
   baseMesh.name = 'ocean-deep-disc';
   group.add(baseMesh);
 
   if (waterColorUrl) {
-    // Auto band sizing: grow the texture (and plane) so the smooth gradient covers
-    // the whole deep-ocean disc, then clip the texture to that disc so the round
-    // silhouette is kept. This removes the seam where the band rectangle used to
-    // stop short of the (larger) deep disc beneath it.
     const edges = defaultBandEdgesM(ocean);
     const bandReachM = edges[edges.length - 1] || 0;
     const reachM = Math.max(bandReachM, discRadius);
@@ -116,8 +146,6 @@ export async function createWaterStack3d({
     const usePad = !!shoreDistanceUrl;
     const padPxX = usePad ? Math.max(0, Math.round(Math.max(0, reachM - mapW / 2) / Math.max(1e-6, mppX))) : 0;
     const padPxZ = usePad ? Math.max(0, Math.round(Math.max(0, reachM - mapD / 2) / Math.max(1e-6, mppZ))) : 0;
-    const paddedW = (cols + 2 * padPxX) * mppX;
-    const paddedD = (rows + 2 * padPxZ) * mppZ;
 
     const bandsUrl = await buildWaterBandsMapUrl({
       rows,
@@ -143,6 +171,8 @@ export async function createWaterStack3d({
 
     group.userData.bandsTextureUrl = bandsUrl || waterColorUrl || '';
     const bandsTex = await loadTexture(bandsUrl || waterColorUrl);
+    const paddedW = (cols + 2 * padPxX) * mppX;
+    const paddedD = (rows + 2 * padPxZ) * mppZ;
     const bandsGeo = new THREE.PlaneGeometry(paddedW, paddedD, 1, 1);
     const bandsMat = layerMaterial({
       map: bandsTex,
@@ -152,7 +182,7 @@ export async function createWaterStack3d({
     });
     const bandsMesh = new THREE.Mesh(bandsGeo, bandsMat);
     bandsMesh.rotation.x = -Math.PI / 2;
-    bandsMesh.position.y = OCEAN_LAYER_Y_M.bands;
+    bandsMesh.position.y = layerY.bands;
     bandsMesh.renderOrder = 1;
     bandsMesh.name = 'ocean-bands-rect';
     group.add(bandsMesh);
@@ -183,18 +213,29 @@ export async function createWaterStack3d({
   if (foamUrl) {
     const foamTex = await loadTexture(foamUrl);
     const foamGeo = new THREE.PlaneGeometry(discDiameter, discDiameter, 1, 1);
-    const foamMat = layerMaterial({
-      map: foamTex,
-      polygonOffset: true,
-      polygonOffsetFactor: -3,
-      polygonOffsetUnits: -4,
-    });
-    const foamMesh = new THREE.Mesh(foamGeo, foamMat);
+    const foamMesh = new THREE.Mesh(
+      foamGeo,
+      layerMaterial({
+        map: foamTex,
+        polygonOffset: true,
+        polygonOffsetFactor: -3,
+        polygonOffsetUnits: -4,
+      }),
+    );
     foamMesh.rotation.x = -Math.PI / 2;
-    foamMesh.position.y = OCEAN_LAYER_Y_M.foam;
-    foamMesh.renderOrder = 2;
+    foamMesh.position.y = layerY.foam;
+    foamMesh.renderOrder = 3;
     foamMesh.name = 'ocean-foam-square';
     group.add(foamMesh);
+  }
+
+  if (isWaterReflectionEnabled(ocean)) {
+    const reflectionMesh = createOceanReflectionDiscMesh(discRadius, ocean);
+    reflectionMesh.rotation.x = -Math.PI / 2;
+    reflectionMesh.position.y = layerY.reflection;
+    reflectionMesh.renderOrder = 2;
+    group.userData.reflectionEnabled = true;
+    group.add(reflectionMesh);
   }
 
   return group;

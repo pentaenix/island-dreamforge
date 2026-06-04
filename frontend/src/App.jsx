@@ -139,6 +139,15 @@ const DEFAULT_EXPORT_SETTINGS = {
   waterColorSteps: 6,
   waterNoiseStrength: 0.1,
   waterNoiseScaleM: 85,
+  waterReflectionEnabled: false,
+  waterReflectionStrength: 0.38,
+  waterReflectionDistortion: 0.2,
+  waterReflectionDistortionScale: 0,
+  waterReflectionTint: 0.22,
+  waterReflectionResolution: 512,
+  oceanBandsOffsetM: 1.35,
+  oceanFoamOffsetM: 2.6,
+  oceanReflectionOffsetM: 2.78,
   coastlineSkirtDepthM: 40,
   seafloorNoiseM: 6,
   circularFalloffSoftnessM: 200,
@@ -298,6 +307,8 @@ export default function App() {
     verticalScale: Number(worldSettings.verticalExaggeration || 1) * getIslandHorizonScale(worldSettings),
     islandHeightScale: getIslandHorizonScale(worldSettings),
     oceanRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
+    oceanDiscRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    oceanDiscDiameterM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings) * 2,
     world: {
       widthM: Number(worldSettings.widthM || 1480),
       depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
@@ -310,6 +321,8 @@ export default function App() {
     },
     ocean: {
       radiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
+      discRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+      discDiameterM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings) * 2,
       maxDepthM: Number(exportSettings.maxOceanDepthM || 220),
       depthCurveExponent: Number(exportSettings.depthCurveExponent || 1.25),
       bathymetrySmoothPx: Number(exportSettings.bathymetrySmoothPx ?? 1),
@@ -956,7 +969,31 @@ export default function App() {
     downloadBlob(blob, `${layer.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}_features.json`);
   }
 
+  async function appendViewportPreviewFiles(form) {
+    const glb = await viewportRef.current?.exportPreviewGlb?.();
+    if (glb) form.append('preview_scene', glb, 'island_preview.glb');
+    const tex = await viewportRef.current?.getTextureBlob?.();
+    if (tex) form.append('terrain_texture', tex, 'terrain_albedo.png');
+    const waterTex = await viewportRef.current?.getWaterTextureBlobs?.();
+    if (waterTex?.bands) form.append('ocean_bands', waterTex.bands, 'ocean_bands.png');
+    if (waterTex?.foam) form.append('ocean_foam', waterTex.foam, 'ocean_foam.png');
+  }
+
+  async function exportPreviewGlb() {
+    if (!finalPreview) return setError('Open the 3D viewport first (generate heightmap, then step 4).');
+    setBusy('Exporting 3D preview GLB...'); setError('');
+    try {
+      const glb = await viewportRef.current?.exportPreviewGlb?.();
+      if (!glb) throw new Error('3D scene not ready — wait for the viewport to finish loading.');
+      downloadBlob(glb, 'island_preview.glb');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(''); }
+  }
+
   async function exportMesh(fmt = 'glb') {
+    if (fmt === 'glb') {
+      return exportPreviewGlb();
+    }
     if (!finalHeight) return setError('Generate a heightmap first.');
     setBusy(`Exporting ${fmt.toUpperCase()} mesh...`); setError('');
     try {
@@ -986,6 +1023,7 @@ export default function App() {
       if (textureBlob) form.append('texture', textureBlob, 'painted_texture.png');
       if (normalBlob) form.append('normal_map', normalBlob, 'normal_map.png');
       if (waterMask) form.append('water_mask', dataUrlToBlob(waterMask), 'water_mask.png');
+      await appendViewportPreviewFiles(form);
       form.append('recipe', JSON.stringify(recipe));
       form.append('options', JSON.stringify(buildMeshExportOptions(worldSettings, derivedDepthM, { maxHeightM: options.maxHeightM })));
       const blob = await postForm('/api/export-project', form, true);
@@ -1054,6 +1092,7 @@ export default function App() {
       const form = new FormData();
       form.append('heightmap', current.blob, current.filename);
       form.append('options', JSON.stringify(islandExportOptions));
+      await appendViewportPreviewFiles(form);
       const blob = await postForm('/api/export-web-island', form, true);
       downloadBlob(blob, 'web_export.zip');
     } catch (e) { setError(e.message); }
@@ -1068,6 +1107,7 @@ export default function App() {
       const form = new FormData();
       form.append('heightmap', current.blob, current.filename);
       form.append('options', JSON.stringify(islandExportOptions));
+      await appendViewportPreviewFiles(form);
       const blob = await postForm('/api/export-game-island', form, true);
       downloadBlob(blob, 'game_export.zip');
     } catch (e) { setError(e.message); }
@@ -1287,11 +1327,12 @@ export default function App() {
           )}
           <h3>Exports</h3>
           <div className="tool-grid">
-            <button onClick={() => exportMesh('glb')}>GLB</button>
-            <button onClick={() => exportMesh('obj')}>OBJ</button>
-            <button onClick={() => exportMesh('stl')}>STL</button>
-            <button onClick={() => exportMesh('ply')}>PLY</button>
+            <button className="primary" onClick={() => exportPreviewGlb()} disabled={!finalPreview}>Export 3D preview (GLB)</button>
+            <button onClick={() => exportMesh('obj')}>OBJ (land only)</button>
+            <button onClick={() => exportMesh('stl')}>STL (land only)</button>
+            <button onClick={() => exportMesh('ply')}>PLY (land only)</button>
           </div>
+          <p className="small muted">GLB matches the live viewport: terrain texture + circular ocean (disc, bands, foam), unlit — no skybox. Web/game ZIPs include the same preview scene when the 3D view is open.</p>
           <button className="primary" onClick={exportProject}>Export full project ZIP</button>
           <button onClick={() => downloadDataUrl(finalHeight, 'final_heightmap.png')}>Download final heightmap</button>
           {waterMask && <button onClick={() => downloadDataUrl(waterMask, 'water_mask.png')}>Download water mask</button>}
