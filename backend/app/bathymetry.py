@@ -88,7 +88,6 @@ def generate_bathymetry(height: np.ndarray, island_mask: np.ndarray, options: Di
     coastal_variation = float(opts.get("coastalVariationStrength", 0.18) or 0.18)
     reef_strength = float(opts.get("reefNoiseStrength", 0.05) or 0.05)
     foam_width = float(opts.get("foamWidthM", 10.0) or 10.0)
-    foam_strength = float(opts.get("foamStrength", 0.22) or 0.22)
     seed = int(opts.get("seed", opts.get("materialSeed", 1337)) or 1337)
     band_edges = band_edges_from_options(opts)
     rim_fade_m = float(opts.get("oceanFoamRimFadeM", 48.0) or 48.0)
@@ -135,7 +134,8 @@ def generate_bathymetry(height: np.ndarray, island_mask: np.ndarray, options: Di
     foam_outer = max(foam_width, pixel_m * 1.25)
     foam = (1.0 - smoothstep(foam_inner, foam_outer, shore_distance)) * water_mask
     foam *= ocean_disc_rim_fade(radial, radius, rim_fade_m)
-    foam = np.clip(foam * (0.7 + 0.3 * foam_noise) * foam_strength, 0.0, 1.0).astype(np.float32)
+    # Presence map only (0..1). foamStrength is applied at render time, not baked here.
+    foam = np.clip(foam * (0.7 + 0.3 * foam_noise), 0.0, 1.0).astype(np.float32)
 
     wave = ((value_noise((rows, cols), max(5, min(rows, cols) * 0.04), seed + 101) + 1.0) * 0.5).astype(np.float32)
     water_color = color_ramp(bathy, smoothness=band_smooth)
@@ -235,13 +235,13 @@ def generate_water_disc_preview(options: Dict[str, Any] | None = None) -> Dict[s
     seafloor = np.where(water_mask, sea - bathy * max_depth, sea).astype(np.float32)
 
     foam_width = float(opts.get("foamWidthM", 12.0) or 12.0)
-    foam_strength = float(opts.get("foamStrength", 0.2) or 0.2)
     foam_noise = (value_noise((size, size), max(3, foam_width / pixel_m * 1.5), seed + 71) + 1.0) * 0.5
     foam_inner = max(pixel_m * 0.35, foam_width * 0.12)
     foam_outer = max(foam_width, pixel_m * 1.25)
     foam = (1.0 - smoothstep(foam_inner, foam_outer, effective_distance)) * water_mask
     foam *= ocean_disc_rim_fade(radial, ocean_r, rim_fade_m)
-    foam = np.clip(foam * (0.7 + 0.3 * foam_noise) * foam_strength, 0.0, 1.0).astype(np.float32)
+    # Presence map only (0..1). foamStrength is applied at render time, not baked here.
+    foam = np.clip(foam * (0.7 + 0.3 * foam_noise), 0.0, 1.0).astype(np.float32)
 
     wave_strength = float(opts.get("waterNoiseStrength", 0.1) or 0.1)
     wave_scale = float(opts.get("waterNoiseScaleM", 85.0) or 85.0)

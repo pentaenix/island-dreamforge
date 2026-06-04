@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { buildFoamLayerTextureUrl, buildWaterBandsMapUrl } from './waterSurfaceComposite.js';
-import { ISLAND_WATER_HEX } from './waterPalette.js';
+import { defaultBandEdgesM, ISLAND_WATER_HEX } from './waterPalette.js';
 import { getOceanDiscRadiusM, getWorldDimsM } from './worldSettings.js';
 
 const DEEP_OCEAN_HEX = ISLAND_WATER_HEX[ISLAND_WATER_HEX.length - 1];
@@ -102,6 +102,21 @@ export async function createWaterStack3d({
   group.add(baseMesh);
 
   if (waterColorUrl) {
+    // Auto band sizing: grow the texture (and plane) so the smooth gradient covers
+    // the whole deep-ocean disc, then clip the texture to that disc so the round
+    // silhouette is kept. This removes the seam where the band rectangle used to
+    // stop short of the (larger) deep disc beneath it.
+    const edges = defaultBandEdgesM(ocean);
+    const bandReachM = edges[edges.length - 1] || 0;
+    const reachM = Math.max(bandReachM, discRadius);
+    const mppX = mapW / Math.max(1, cols);
+    const mppZ = mapD / Math.max(1, rows);
+    const usePad = !!shoreDistanceUrl;
+    const padPxX = usePad ? Math.max(0, Math.round(Math.max(0, reachM - mapW / 2) / Math.max(1e-6, mppX))) : 0;
+    const padPxZ = usePad ? Math.max(0, Math.round(Math.max(0, reachM - mapD / 2) / Math.max(1e-6, mppZ))) : 0;
+    const paddedW = (cols + 2 * padPxX) * mppX;
+    const paddedD = (rows + 2 * padPxZ) * mppZ;
+
     const bandsUrl = await buildWaterBandsMapUrl({
       rows,
       cols,
@@ -116,13 +131,16 @@ export async function createWaterStack3d({
       shoreDistanceUrl: shoreDistanceUrl || '',
       shoreDistanceMaxM,
       bandSmoothness: bandSmooth,
+      padPxX,
+      padPxZ,
+      discRadiusM: usePad ? discRadius : 0,
     }).catch((err) => {
       console.warn('Water bands map failed', err);
       return waterColorUrl;
     });
 
     const bandsTex = await loadTexture(bandsUrl || waterColorUrl);
-    const bandsGeo = new THREE.PlaneGeometry(mapW, mapD, 1, 1);
+    const bandsGeo = new THREE.PlaneGeometry(paddedW, paddedD, 1, 1);
     const bandsMat = layerMaterial({
       map: bandsTex,
       polygonOffset: true,
@@ -150,6 +168,9 @@ export async function createWaterStack3d({
     oceanSettings: ocean,
     mapSizePx,
     ocean,
+    shoreDistanceUrl: shoreDistanceUrl || '',
+    shoreDistanceMaxM,
+    heights,
   }).catch((err) => {
     console.warn('Foam layer failed', err);
     return '';

@@ -570,6 +570,8 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     worldSettings?.terrainMeshResolution,
     worldSettings?.featureSpacingM,
     worldSettings?.featureScale,
+    // Texture resolution changes require a fresh (resized) texture canvas.
+    textureSettings?.textureSize,
   ]);
   useEffect(() => { const s = stateRef.current; if (heightUrl && s.heights) rebuildTerrain(heightUrl); }, [waterDepthUrl, waterColorUrl, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl, showSeafloor]);
   useEffect(() => {
@@ -640,7 +642,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     ]);
 
     s.rows = rows; s.cols = cols; s.heights = heights; s.islandMask = islandMask; s.materialPreview = materialPreview;
-    const texSize = clamp(Number(propsRef.current.textureSettings?.textureSize || 1024), 512, 2048);
+    const texSize = clamp(Number(propsRef.current.textureSettings?.textureSize || 1024), 512, 8192);
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = texSize; textureCanvas.height = texSize;
     const normalCanvas = document.createElement('canvas'); normalCanvas.width = texSize; normalCanvas.height = texSize;
     s.textureCanvas = textureCanvas; s.textureContext = textureCanvas.getContext('2d', { willReadFrequently: true });

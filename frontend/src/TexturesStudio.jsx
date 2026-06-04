@@ -84,9 +84,12 @@ export default function TexturesStudio({
           </label>
         </details>
 
-        <details>
-          <summary>Export &amp; 3D</summary>
-          <Slider label="Texture resolution" value={settings.textureSize ?? 2048} min={512} max={2048} step={256} suffix="px" onChange={(v) => patch({ textureSize: v })} />
+        <details open>
+          <summary>Model definition</summary>
+          <Slider label="Texture resolution" value={settings.textureSize ?? 2048} min={512} max={8192} step={256} suffix="px" onChange={(v) => patch({ textureSize: v })} />
+          <p className="small muted">
+            One texture is stretched across the whole island, so higher values mean smaller texels (sharper sand, rock, and forest detail) when the camera gets close. 4096+ is noticeably heavier on GPU/memory.
+          </p>
           <label className="checkline">
             <input
               type="checkbox"

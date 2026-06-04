@@ -42,6 +42,71 @@ function sampleFoamAt(foamData, fw, fh, col, row) {
   return foamData[(r * fw + c) * 4] / 255;
 }
 
+function smoothstepF(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Full-precision distance-to-land field (meters) from the height grid, for a crisp surf line. */
+function landDistanceFieldM(heights, cols, rows, seaLevelM, maxH, worldSettings, mpp) {
+  const INF = (cols + rows) * 2;
+  const dist = new Float32Array(cols * rows);
+  for (let i = 0; i < dist.length; i++) {
+    dist[i] = isDryLandM(heights, i, seaLevelM, maxH, worldSettings) ? 0 : INF;
+  }
+  const D = 1.41421356;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const p = y * cols + x;
+      if (x > 0) dist[p] = Math.min(dist[p], dist[p - 1] + 1);
+      if (y > 0) dist[p] = Math.min(dist[p], dist[p - cols] + 1);
+      if (x > 0 && y > 0) dist[p] = Math.min(dist[p], dist[p - cols - 1] + D);
+      if (x < cols - 1 && y > 0) dist[p] = Math.min(dist[p], dist[p - cols + 1] + D);
+    }
+  }
+  for (let y = rows - 1; y >= 0; y--) {
+    for (let x = cols - 1; x >= 0; x--) {
+      const p = y * cols + x;
+      if (x < cols - 1) dist[p] = Math.min(dist[p], dist[p + 1] + 1);
+      if (y < rows - 1) dist[p] = Math.min(dist[p], dist[p + cols] + 1);
+      if (x < cols - 1 && y < rows - 1) dist[p] = Math.min(dist[p], dist[p + cols + 1] + D);
+      if (x > 0 && y < rows - 1) dist[p] = Math.min(dist[p], dist[p + cols - 1] + D);
+    }
+  }
+  const m = Math.max(1e-6, mpp);
+  for (let i = 0; i < dist.length; i++) dist[i] *= m;
+  return dist;
+}
+
+function sampleFieldBilinear(field, cols, rows, cf, rf) {
+  const c0 = Math.max(0, Math.min(cols - 1, Math.floor(cf)));
+  const r0 = Math.max(0, Math.min(rows - 1, Math.floor(rf)));
+  const c1 = Math.min(cols - 1, c0 + 1);
+  const r1 = Math.min(rows - 1, r0 + 1);
+  const tx = Math.max(0, Math.min(1, cf - c0));
+  const ty = Math.max(0, Math.min(1, rf - r0));
+  const top = field[r0 * cols + c0] * (1 - tx) + field[r0 * cols + c1] * tx;
+  const bot = field[r1 * cols + c0] * (1 - tx) + field[r1 * cols + c1] * tx;
+  return top * (1 - ty) + bot * ty;
+}
+
+/** Bilinear sample of the shore-distance map (red channel) back to meters. */
+function sampleDistanceM(distData, fw, fh, cf, rf, maxDistM) {
+  const c0 = Math.max(0, Math.min(fw - 1, Math.floor(cf)));
+  const r0 = Math.max(0, Math.min(fh - 1, Math.floor(rf)));
+  const c1 = Math.min(fw - 1, c0 + 1);
+  const r1 = Math.min(fh - 1, r0 + 1);
+  const tx = Math.max(0, Math.min(1, cf - c0));
+  const ty = Math.max(0, Math.min(1, rf - r0));
+  const v00 = distData[(r0 * fw + c0) * 4];
+  const v10 = distData[(r0 * fw + c1) * 4];
+  const v01 = distData[(r1 * fw + c0) * 4];
+  const v11 = distData[(r1 * fw + c1) * 4];
+  const top = v00 * (1 - tx) + v10 * tx;
+  const bot = v01 * (1 - tx) + v11 * tx;
+  return ((top * (1 - ty) + bot * ty) / 255) * maxDistM;
+}
+
 /**
  * Color depth bands from shore-distance + live band sliders (falls back to exported waterColor).
  */
@@ -59,6 +124,9 @@ export async function buildWaterBandsMapUrl({
   shoreDistanceUrl = '',
   shoreDistanceMaxM = 0,
   bandSmoothness = 0.35,
+  padPxX = 0,
+  padPxZ = 0,
+  discRadiusM = 0,
 }) {
   const smooth = Math.max(0, Math.min(1, Number(bandSmoothness) || 0));
   const maxH = getWorldMaxHeightM(maxHeightM, worldSettings);
@@ -74,23 +142,71 @@ export async function buildWaterBandsMapUrl({
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
   if (shoreDistanceUrl) {
+    // Read the island-sized shore-distance map into an inner buffer...
     const distImg = await loadImage(shoreDistanceUrl);
-    ctx.drawImage(distImg, 0, 0, cols, rows);
-    const distData = ctx.getImageData(0, 0, cols, rows).data;
-    const out = ctx.createImageData(cols, rows);
+    const distCanvas = document.createElement('canvas');
+    distCanvas.width = cols;
+    distCanvas.height = rows;
+    const dctx = distCanvas.getContext('2d', { willReadFrequently: true });
+    dctx.drawImage(distImg, 0, 0, cols, rows);
+    const distData = dctx.getImageData(0, 0, cols, rows).data;
+
+    // ...then paint into a padded canvas so deep bands can finish past the world rect.
+    const padX = Math.max(0, Math.round(padPxX));
+    const padZ = Math.max(0, Math.round(padPxZ));
+    const mppX = mapW / Math.max(1, cols);
+    const mppZ = mapD / Math.max(1, rows);
+    const outW = cols + 2 * padX;
+    const outH = rows + 2 * padZ;
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = outW;
+    outCanvas.height = outH;
+    const octx = outCanvas.getContext('2d', { willReadFrequently: true });
+    const out = octx.createImageData(outW, outH);
     const data = out.data;
 
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const p = (r * cols + c) * 4;
-        const idx = r * cols + c;
+    // Clip the band texture to the deep-ocean disc so the round ocean edge is kept
+    // even though the plane that carries it is a (padded) rectangle.
+    const centerC = (outW - 1) / 2;
+    const centerR = (outH - 1) / 2;
+    const discR = Number(discRadiusM) || 0;
 
-        if (isDryLandM(heights, idx, seaLevelM, maxH, worldSettings)) {
-          data[p + 3] = 0;
-          continue;
+    for (let pr = 0; pr < outH; pr++) {
+      for (let pc = 0; pc < outW; pc++) {
+        const p = (pr * outW + pc) * 4;
+        const ic = pc - padX;
+        const ir = pr - padZ;
+        const inside = ic >= 0 && ic < cols && ir >= 0 && ir < rows;
+
+        if (discR > 0) {
+          const wx = (pc - centerC) * mppX;
+          const wz = (pr - centerR) * mppZ;
+          if (Math.hypot(wx, wz) > discR) {
+            data[p + 3] = 0;
+            continue;
+          }
         }
 
-        const distM = (distData[p] / 255) * maxDistM;
+        let distM;
+        if (inside) {
+          const idx = ir * cols + ic;
+          if (isDryLandM(heights, idx, seaLevelM, maxH, worldSettings)) {
+            data[p + 3] = 0;
+            continue;
+          }
+          distM = (distData[idx * 4] / 255) * maxDistM;
+        } else {
+          // Padding ring: clamp to the nearest island-edge pixel and walk the
+          // remaining distance outward so the depth gradient keeps growing.
+          const cc = Math.max(0, Math.min(cols - 1, ic));
+          const cr2 = Math.max(0, Math.min(rows - 1, ir));
+          const borderDistM = (distData[(cr2 * cols + cc) * 4] / 255) * maxDistM;
+          const dx = (ic - cc) * mppX;
+          const dz = (ir - cr2) * mppZ;
+          distM = borderDistM + Math.hypot(dx, dz);
+        }
+
         const bathy01 = bathy01FromDistanceM(distM, edges);
         const [cr, cg, cb] = sampleWaterColor(bathy01, smooth);
         data[p] = cr;
@@ -100,8 +216,8 @@ export async function buildWaterBandsMapUrl({
       }
     }
 
-    ctx.putImageData(out, 0, 0);
-    return canvas.toDataURL('image/png');
+    octx.putImageData(out, 0, 0);
+    return outCanvas.toDataURL('image/png');
   }
 
   if (!waterColorUrl) return '';
@@ -146,6 +262,9 @@ export async function buildFoamLayerTextureUrl({
   oceanSettings,
   mapSizePx,
   ocean = {},
+  shoreDistanceUrl = '',
+  shoreDistanceMaxM = 0,
+  heights = null,
 }) {
   const size = 512;
   const discR = Math.max(50, discRadiusM);
@@ -156,12 +275,39 @@ export async function buildFoamLayerTextureUrl({
   const waveStrength = Number(ocean.waterNoiseStrength ?? 0.1);
   const waveScaleM = Math.max(8, Number(ocean.waterNoiseScaleM ?? 85));
   const seed = Math.round(Number(ocean.materialSeed ?? ocean.seed ?? 1337)) || 1337;
+  // Backend foam_mask is now a 0..1 presence map; apply strength + visibility gain here.
+  const foamStrength = Math.max(0, Number(ocean.foamStrength ?? 0.22));
+  const FOAM_ALPHA_GAIN = 4.0;
+  const foamWidthM = Math.max(2, Number(ocean.foamWidthM ?? 12));
+  const foamInner = Math.max(0.5, foamWidthM * 0.12);
+  const maxH = getWorldMaxHeightM(maxHeightM, worldSettings);
 
   const fw = mapSizePx.width || size;
   const fh = mapSizePx.height || size;
 
+  // Primary source: a full-precision distance-to-land field from the height grid,
+  // so the surf line is crisp and width-controllable (the exported 8-bit shore
+  // distance is scaled to the whole water map, leaving almost no near-shore detail).
+  const mppX = widthM / Math.max(1, cols);
+  const mppZ = depthM / Math.max(1, rows);
+  let landField = null;
+  if (heights && heights.length >= cols * rows && cols > 1 && rows > 1) {
+    landField = landDistanceFieldM(heights, cols, rows, seaLevelM, maxH, worldSettings, (mppX + mppZ) * 0.5);
+  }
+
+  // Fallbacks when no height grid is available.
+  const maxDistM = Number(shoreDistanceMaxM) > 0 ? Number(shoreDistanceMaxM) : 0;
+  let distData = null;
   let foamData = null;
-  if (foamMaskUrl) {
+  if (!landField && shoreDistanceUrl && maxDistM > 0) {
+    const distImg = await loadImage(shoreDistanceUrl);
+    const dc = document.createElement('canvas');
+    dc.width = fw;
+    dc.height = fh;
+    const dctx = dc.getContext('2d', { willReadFrequently: true });
+    dctx.drawImage(distImg, 0, 0, fw, fh);
+    distData = dctx.getImageData(0, 0, fw, fh).data;
+  } else if (!landField && foamMaskUrl) {
     const foamImg = await loadImage(foamMaskUrl);
     const fc = document.createElement('canvas');
     fc.width = fw;
@@ -195,7 +341,29 @@ export async function buildFoamLayerTextureUrl({
       const rimFactor = oceanDiscRimFade(radial, discR, rimFadeM);
       const gc = (wx / widthM + 0.5) * Math.max(1, fw - 1);
       const gr = (wz / depthM + 0.5) * Math.max(1, fh - 1);
-      let foam = sampleFoamAt(foamData, fw, fh, gc, gr) * rimFactor;
+
+      let foamBase = 0;
+      if (landField) {
+        // Keep foam on the water side of the shoreline only.
+        const gci = Math.round(gc);
+        const gri = Math.round(gr);
+        const onLand =
+          gci >= 0 && gci < cols && gri >= 0 && gri < rows &&
+          isDryLandM(heights, gri * cols + gci, seaLevelM, maxH, worldSettings);
+        if (onLand) {
+          data[p + 3] = 0;
+          continue;
+        }
+        const distM = sampleFieldBilinear(landField, cols, rows, gc, gr);
+        foamBase = 1 - smoothstepF(foamInner, foamWidthM, distM);
+      } else if (distData) {
+        const distM = sampleDistanceM(distData, fw, fh, gc, gr, maxDistM);
+        foamBase = 1 - smoothstepF(foamInner, foamWidthM, distM);
+      } else if (foamData) {
+        foamBase = sampleFoamAt(foamData, fw, fh, gc, gr);
+      }
+
+      let foam = Math.min(1, foamBase * rimFactor * foamStrength * FOAM_ALPHA_GAIN);
 
       if (waveStrength > 0 && rimFactor > 0.02 && foam > 0.02) {
         const wave = fbmWorld(wx, wz, waveScaleM, seed + 101);
