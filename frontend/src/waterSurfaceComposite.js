@@ -2,9 +2,9 @@
  * Water layer textures for 3D viewport.
  */
 
-import { isDryLandAtWorld } from './waterMaskFromHeights.js';
-import { oceanDiscRimFade, sampleWaterColor } from './waterPalette.js';
-import { getWorldMaxHeightM } from './worldSettings.js';
+import { isDryLandM } from './waterMaskFromHeights.js';
+import { bathy01FromDistanceM, defaultBandEdgesM, oceanDiscRimFade, sampleWaterColor } from './waterPalette.js';
+import { getWorldMaxHeightM, maxShoreDistanceScaleM } from './worldSettings.js';
 
 function hashNoise(ix, iy, seed) {
   const s = Math.sin((ix + seed * 13.17) * 12.9898 + (iy - seed * 7.91) * 78.233) * 43758.5453;
@@ -43,8 +43,7 @@ function sampleFoamAt(foamData, fw, fh, col, row) {
 }
 
 /**
- * Land-alpha pass on the backend-derived band map. Never scales the source image —
- * canvas matches export pixels; world extent comes from bandsPlaneWidthM/DepthM.
+ * Color depth bands from shore-distance + live band sliders (falls back to exported waterColor).
  */
 export async function buildWaterBandsMapUrl({
   rows,
@@ -52,69 +51,74 @@ export async function buildWaterBandsMapUrl({
   heights,
   mapW,
   mapD,
-  bandsPlaneWidthM = 0,
-  bandsPlaneDepthM = 0,
   seaLevelM,
   maxHeightM,
   worldSettings,
+  oceanSettings = {},
   waterColorUrl = '',
-  waterDepthUrl = '',
+  shoreDistanceUrl = '',
+  shoreDistanceMaxM = 0,
   bandSmoothness = 0.35,
 }) {
-  if (!waterColorUrl) return '';
-
   const smooth = Math.max(0, Math.min(1, Number(bandSmoothness) || 0));
   const maxH = getWorldMaxHeightM(maxHeightM, worldSettings);
-
-  const colorImg = await loadImage(waterColorUrl);
-  const texCols = colorImg.width;
-  const texRows = colorImg.height;
-  const planeW = Number(bandsPlaneWidthM) > 0 ? Number(bandsPlaneWidthM) : mapW;
-  const planeD = Number(bandsPlaneDepthM) > 0 ? Number(bandsPlaneDepthM) : mapD;
+  const mapSizePx = { width: cols, height: rows };
+  const edges = defaultBandEdgesM(oceanSettings);
+  const maxDistM = Number(shoreDistanceMaxM) > 0
+    ? Number(shoreDistanceMaxM)
+    : maxShoreDistanceScaleM(worldSettings, mapSizePx, oceanSettings);
 
   const canvas = document.createElement('canvas');
-  canvas.width = texCols;
-  canvas.height = texRows;
+  canvas.width = cols;
+  canvas.height = rows;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(colorImg, 0, 0);
 
-  const img = ctx.getImageData(0, 0, texCols, texRows);
-  const data = img.data;
+  if (shoreDistanceUrl) {
+    const distImg = await loadImage(shoreDistanceUrl);
+    ctx.drawImage(distImg, 0, 0, cols, rows);
+    const distData = ctx.getImageData(0, 0, cols, rows).data;
+    const out = ctx.createImageData(cols, rows);
+    const data = out.data;
 
-  let bathyNorm = null;
-  if (waterDepthUrl) {
-    const normImg = await loadImage(waterDepthUrl);
-    if (normImg.width !== texCols || normImg.height !== texRows) {
-      console.warn(
-        'waterDepth size does not match waterColor; regenerate derived maps after changing band reach',
-      );
-    } else {
-      const nc = document.createElement('canvas');
-      nc.width = texCols;
-      nc.height = texRows;
-      const nctx = nc.getContext('2d');
-      nctx.drawImage(normImg, 0, 0);
-      bathyNorm = nctx.getImageData(0, 0, texCols, texRows).data;
-    }
-  }
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const p = (r * cols + c) * 4;
+        const idx = r * cols + c;
 
-  for (let r = 0; r < texRows; r++) {
-    for (let c = 0; c < texCols; c++) {
-      const p = (r * texCols + c) * 4;
-      const wx = (c / (texCols - 1) - 0.5) * planeW;
-      const wz = (r / (texRows - 1) - 0.5) * planeD;
+        if (isDryLandM(heights, idx, seaLevelM, maxH, worldSettings)) {
+          data[p + 3] = 0;
+          continue;
+        }
 
-      if (isDryLandAtWorld(wx, wz, rows, cols, heights, seaLevelM, maxH, worldSettings, mapW, mapD)) {
-        data[p + 3] = 0;
-        continue;
-      }
-
-      if (bathyNorm) {
-        const bathy01 = bathyNorm[p] / 255;
+        const distM = (distData[p] / 255) * maxDistM;
+        const bathy01 = bathy01FromDistanceM(distM, edges);
         const [cr, cg, cb] = sampleWaterColor(bathy01, smooth);
         data[p] = cr;
         data[p + 1] = cg;
         data[p + 2] = cb;
+        data[p + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(out, 0, 0);
+    return canvas.toDataURL('image/png');
+  }
+
+  if (!waterColorUrl) return '';
+
+  const colorImg = await loadImage(waterColorUrl);
+  ctx.drawImage(colorImg, 0, 0, cols, rows);
+  const img = ctx.getImageData(0, 0, cols, rows);
+  const data = img.data;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const p = (r * cols + c) * 4;
+      const idx = r * cols + c;
+
+      if (isDryLandM(heights, idx, seaLevelM, maxH, worldSettings)) {
+        data[p + 3] = 0;
+        continue;
       }
 
       if (data[p] + data[p + 1] + data[p + 2] < 12) {

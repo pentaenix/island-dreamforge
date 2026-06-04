@@ -49,20 +49,32 @@ def band_edges_from_options(opts: Dict[str, Any]) -> List[float]:
                 edges[i] = edges[i - 1] + 1.0
         return edges
 
-    if not opts.get("waterBandUseLegacyBands"):
-        base = float(opts.get("waterBandStepM", 12.0) or 12.0)
-        inc = float(opts.get("waterBandStepIncreaseM", 8.0) or 0.0)
-        power = float(opts.get("waterBandStepGrowthPower", 2.0) or 2.0)
-        return band_edges_from_steps(base, inc, growth_power=power)
+    base = _read_float(opts, "waterBandStepM", 12.0, minimum=1.0)
+    inc = _read_float(opts, "waterBandStepIncreaseM", 8.0, minimum=0.0)
+    power = _read_float(opts, "waterBandStepGrowthPower", 2.0, minimum=1.0)
+    return band_edges_from_steps(base, inc, growth_power=power)
 
-    shallow = float(opts.get("shallowShelfM", opts.get("shoreShelfWidthM", 24.0)) or 24.0)
-    mid = float(opts.get("midShelfM", opts.get("midWaterDistanceM", 70.0)) or 70.0)
-    deep = float(opts.get("deepStartM", opts.get("deepWaterDistanceM", 150.0)) or 150.0)
-    edges = [0.0, max(4.0, shallow * 0.35), shallow, mid, deep, deep + 80.0]
-    for i in range(1, len(edges)):
-        if edges[i] <= edges[i - 1]:
-            edges[i] = edges[i - 1] + 1.0
-    return edges
+
+def _read_float(opts: Dict[str, Any], key: str, default: float, minimum: float | None = None) -> float:
+    """Read a numeric export option; 0 is valid (do not treat as missing)."""
+    ocean = opts.get("ocean") if isinstance(opts.get("ocean"), dict) else {}
+    if key in opts and opts[key] is not None:
+        value = float(opts[key])
+    elif key in ocean and ocean[key] is not None:
+        value = float(ocean[key])
+    else:
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def max_shore_distance_scale_m(opts: Dict[str, Any]) -> float:
+    """Upper bound for encoding shore-distance maps (meters)."""
+    edges = band_edges_from_options(opts or {})
+    ocean_r = float(opts.get("oceanRadiusM", 0.0) or 0.0) if opts else 0.0
+    band_reach = float(edges[-1]) if edges else 0.0
+    return max(1.0, ocean_r, band_reach)
 
 
 def distance_to_bathy01_bands(

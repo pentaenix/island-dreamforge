@@ -18,8 +18,8 @@ import {
   getMetersPerPixel,
   getOceanDiscRadiusM,
   getWaterDiscPreviewSpanM,
-  getBandsPlaneDimsM,
   getWaterMapRadiusM,
+  maxShoreDistanceScaleM,
   normalizeWorldSettings,
 } from './worldSettings.js';
 import { buildHeightGenFingerprint } from './heightGenFingerprint.js';
@@ -128,12 +128,6 @@ const DEFAULT_EXPORT_SETTINGS = {
   waterBandStepIncreaseM: 16,
   waterBandStepGrowthPower: 2,
   oceanFoamRimFadeM: 48,
-  shoreShelfWidthM: 24,
-  shallowShelfM: 24,
-  midWaterDistanceM: 70,
-  midShelfM: 70,
-  deepWaterDistanceM: 150,
-  deepStartM: 150,
   depthCurveExponent: 1.25,
   bathymetrySmoothPx: 1,
   bathymetryRelaxPasses: 0,
@@ -295,11 +289,6 @@ export default function App() {
   const canGenerateHeightmap = !!mapFile && samples.length > 0
     && Math.max(...samples.map((s) => Number(s.height || 0))) > Number(options.seaLevelM || 0) + 0.5;
 
-  const bandsPlaneM = useMemo(
-    () => getBandsPlaneDimsM(worldSettings, mapSizePx, exportSettings),
-    [worldSettings, mapSizePx, exportSettings],
-  );
-
   const islandExportOptions = useMemo(() => ({
     ...exportSettings,
     maxHeightM: Number(options.maxHeightM || 500),
@@ -309,8 +298,6 @@ export default function App() {
     verticalScale: Number(worldSettings.verticalExaggeration || 1) * getIslandHorizonScale(worldSettings),
     islandHeightScale: getIslandHorizonScale(worldSettings),
     oceanRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
-    bandsPlaneWidthM: bandsPlaneM.width,
-    bandsPlaneDepthM: bandsPlaneM.depth,
     world: {
       widthM: Number(worldSettings.widthM || 1480),
       depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
@@ -324,12 +311,6 @@ export default function App() {
     ocean: {
       radiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
       maxDepthM: Number(exportSettings.maxOceanDepthM || 220),
-      shoreShelfWidthM: Number(exportSettings.shoreShelfWidthM || exportSettings.shallowShelfM || 24),
-      shallowShelfM: Number(exportSettings.shallowShelfM || exportSettings.shoreShelfWidthM || 24),
-      midWaterDistanceM: Number(exportSettings.midWaterDistanceM || exportSettings.midShelfM || 70),
-      midShelfM: Number(exportSettings.midShelfM || exportSettings.midWaterDistanceM || 70),
-      deepWaterDistanceM: Number(exportSettings.deepWaterDistanceM || 150),
-      deepStartM: Number(exportSettings.deepStartM || exportSettings.deepWaterDistanceM || 150),
       depthCurveExponent: Number(exportSettings.depthCurveExponent || 1.25),
       bathymetrySmoothPx: Number(exportSettings.bathymetrySmoothPx ?? 1),
       bathymetryRelaxPasses: Number(exportSettings.bathymetryRelaxPasses ?? 0),
@@ -338,6 +319,12 @@ export default function App() {
       foamWidthM: Number(exportSettings.foamWidthM || 10),
       foamStrength: Number(exportSettings.foamStrength ?? 0.22),
       coastlineSkirtDepthM: Number(exportSettings.coastlineSkirtDepthM || 40),
+      waterBandStepM: exportSettings.waterBandStepM ?? 12,
+      waterBandStepIncreaseM: exportSettings.waterBandStepIncreaseM ?? 16,
+      waterBandStepGrowthPower: Number(exportSettings.waterBandStepGrowthPower ?? 2),
+      waterBandSmoothness: Number(exportSettings.waterBandSmoothness ?? exportSettings.waterColorSmoothness ?? 0.35),
+      waterColorSmoothness: Number(exportSettings.waterBandSmoothness ?? exportSettings.waterColorSmoothness ?? 0.35),
+      oceanFoamRimFadeM: Number(exportSettings.oceanFoamRimFadeM ?? 48),
     },
     detail: {
       preview: exportSettings.previewDetail,
@@ -345,7 +332,11 @@ export default function App() {
       game: exportSettings.gameDetail,
       chunkSize: Number(exportSettings.chunkSize || 16),
     },
-  }), [exportSettings, options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, bandsPlaneM, mapSizePx]);
+  }), [exportSettings, options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM]);
+
+  const islandExportOptionsRef = useRef(islandExportOptions);
+  islandExportOptionsRef.current = islandExportOptions;
+
   const waterPreviewOptions = useMemo(() => ({
     ...exportSettings,
     widthM: Number(worldSettings.widthM || 1480),
@@ -372,13 +363,7 @@ export default function App() {
     depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
     waterMapRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
     waterMapRadiusAuto: exportSettings.waterMapRadiusAuto !== false,
-    bandsPlaneWidthM: bandsPlaneM.width,
-    bandsPlaneDepthM: bandsPlaneM.depth,
-    oceanRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
     islandHeightScale: getIslandHorizonScale(worldSettings),
-    shallowShelfM: Number(exportSettings.shallowShelfM || exportSettings.shoreShelfWidthM || 24),
-    midShelfM: Number(exportSettings.midShelfM || exportSettings.midWaterDistanceM || 70),
-    deepStartM: Number(exportSettings.deepStartM || exportSettings.deepWaterDistanceM || 150),
     bathymetrySmoothPx: Number(exportSettings.bathymetrySmoothPx ?? 1),
     coastalVariationStrength: Number(exportSettings.coastalVariationStrength ?? 0.18),
     reefNoiseStrength: Number(exportSettings.reefNoiseStrength ?? 0.05),
@@ -386,8 +371,8 @@ export default function App() {
     waterBandStepM: Number(exportSettings.waterBandStepM ?? 12),
     waterBandStepIncreaseM: Number(exportSettings.waterBandStepIncreaseM ?? 16),
     waterBandStepGrowthPower: Number(exportSettings.waterBandStepGrowthPower ?? 2),
-    waterBandSmoothness: Number(exportSettings.waterBandSmoothness ?? 0.35),
-  }), [options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, exportSettings, mapSizePx, bandsPlaneM]);
+    waterBandSmoothness: Number(exportSettings.waterBandSmoothness ?? exportSettings.waterColorSmoothness ?? 0.35),
+  }), [options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, exportSettings, mapSizePx]);
 
   function applySnapshotToState(saved) {
     if (!saved) return;
@@ -408,7 +393,10 @@ export default function App() {
     setOptions({ ...DEFAULT_OPTIONS, ...(saved.options || {}) });
     setWaterSettings({ ...DEFAULT_WATER_SETTINGS, ...(saved.waterSettings || {}) });
     setTextureSettings({ ...DEFAULT_TEXTURE_SETTINGS, ...(saved.textureSettings || {}) });
-    setExportSettings({ ...DEFAULT_EXPORT_SETTINGS, ...(saved.exportSettings || {}) });
+    const restoredExport = { ...DEFAULT_EXPORT_SETTINGS, ...(saved.exportSettings || {}) };
+    delete restoredExport.waterBandEdgesM;
+    delete restoredExport.waterBandUseLegacyBands;
+    setExportSettings(restoredExport);
     setDerivedMaps(saved.derivedMaps || null);
     setWorldSettings(normalizeWorldSettings(saved.worldSettings || {}));
     setMapSizePx(saved.mapSizePx || { width: 0, height: 0 });
@@ -1035,7 +1023,7 @@ export default function App() {
       const current = await currentHeightBlobForExport('derived_heightmap.png');
       const form = new FormData();
       form.append('heightmap', current.blob, current.filename);
-      form.append('options', JSON.stringify(islandExportOptions));
+      form.append('options', JSON.stringify(islandExportOptionsRef.current));
       const data = await postForm('/api/island-derived-maps', form);
       setDerivedMaps(data);
     } catch (e) {
@@ -1051,12 +1039,12 @@ export default function App() {
   }, [stage, waterPreviewKey]);
 
   React.useEffect(() => {
-    if (!finalHeight) return;
+    if (stage < 3 || !finalHeight) return;
     const timer = setTimeout(() => {
       refreshDerivedMaps({ silent: true });
     }, 450);
     return () => clearTimeout(timer);
-  }, [finalHeight, derivedPreviewKey]);
+  }, [stage, finalHeight, derivedPreviewKey]);
 
   async function exportWebIsland() {
     if (!finalHeight) return setError('Generate a heightmap first.');
@@ -1315,7 +1303,7 @@ export default function App() {
           />
         </aside>
         <div className="viewer-wrap">
-          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} foamMaskUrl={derivedMaps?.foamMask || ''} waterMaskUrl={derivedMaps?.waterMask || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} bandsPlaneWidthM={derivedMaps?.bandsPlaneWidthM} bandsPlaneDepthM={derivedMaps?.bandsPlaneDepthM} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
+          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} shoreDistanceUrl={derivedMaps?.shoreDistancePreview || ''} shoreDistanceMaxM={maxShoreDistanceScaleM(worldSettings, mapSizePx, exportSettings)} foamMaskUrl={derivedMaps?.foamMask || ''} waterMaskUrl={derivedMaps?.waterMask || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
         </div>
       </section>}
     </div>

@@ -44,8 +44,8 @@ def _options() -> str:
             "seaLevelM": 0,
             "oceanRadiusM": 80,
             "maxOceanDepthM": 30,
-            "shoreShelfWidthM": 10,
-            "deepWaterDistanceM": 50,
+            "waterBandStepM": 10,
+            "waterBandStepIncreaseM": 5,
             "depthCurveExponent": 1.2,
             "seafloorNoiseM": 0,
             "circularFalloffSoftnessM": 0,
@@ -78,6 +78,13 @@ class IslandExportRouteTests(unittest.TestCase):
 
         self.assertEqual(body["width"], 9)
         self.assertEqual(body["height"], 9)
+        bands = body["metadata"]["bandsMap"]
+        self.assertIn("footprintCols", bands)
+        self.assertIn("footprintRows", bands)
+        self.assertIn("metersPerPixelX", bands)
+        self.assertEqual(bands["footprintCols"], 9)
+        self.assertEqual(bands["footprintRows"], 9)
+        self.assertAlmostEqual(body["bandsPlaneWidthM"], bands["planeWidthM"], places=1)
         for key in ["islandMask", "shorelineMask", "oceanDiscMask", "shoreDistance", "waterDepth", "materialIds", "materialSplat"]:
             self.assertTrue(body[key].startswith("data:image/png;base64,"))
         self.assertGreater(body["metadata"]["stats"]["landPixels"], 0)

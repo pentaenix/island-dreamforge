@@ -11,7 +11,7 @@ import trimesh
 from PIL import Image
 
 from .image_utils import array_to_16bit_png, image_to_data_url
-from .bathymetry import crop_bathymetry_to_footprint
+from .water_band_steps import band_edges_from_options, max_shore_distance_scale_m
 from .island_maps import (
     compute_shoreline_mask,
     derive_island_mask,
@@ -100,11 +100,6 @@ def normalized_export_options(options: Dict[str, Any] | None = None) -> Dict[str
         "seaLevelM": opts.get("seaLevelM", world.get("seaLevelM", 0)),
         "oceanRadiusM": opts.get("oceanRadiusM", ocean.get("radiusM", ocean.get("oceanRadiusM", 6500))),
         "maxOceanDepthM": opts.get("maxOceanDepthM", ocean.get("maxDepthM", ocean.get("maxOceanDepthM", 220))),
-        "shoreShelfWidthM": opts.get("shoreShelfWidthM", ocean.get("shoreShelfWidthM", 24)),
-        "shallowShelfM": opts.get("shallowShelfM", opts.get("shoreShelfWidthM", ocean.get("shallowShelfM", ocean.get("shoreShelfWidthM", 24)))),
-        "midShelfM": opts.get("midShelfM", opts.get("midWaterDistanceM", ocean.get("midShelfM", ocean.get("midWaterDistanceM", 70)))),
-        "deepWaterDistanceM": opts.get("deepWaterDistanceM", ocean.get("deepWaterDistanceM", 150)),
-        "deepStartM": opts.get("deepStartM", opts.get("deepWaterDistanceM", ocean.get("deepStartM", ocean.get("deepWaterDistanceM", 150)))),
         "depthCurveExponent": opts.get("depthCurveExponent", ocean.get("depthCurveExponent", 1.25)),
         "bathymetrySmoothPx": opts.get("bathymetrySmoothPx", ocean.get("bathymetrySmoothPx", 1)),
         "bathymetryRelaxPasses": opts.get("bathymetryRelaxPasses", ocean.get("bathymetryRelaxPasses", 0)),
@@ -115,7 +110,14 @@ def normalized_export_options(options: Dict[str, Any] | None = None) -> Dict[str
         "waterBandStepM": opts.get("waterBandStepM", ocean.get("waterBandStepM", 12)),
         "waterBandStepIncreaseM": opts.get("waterBandStepIncreaseM", ocean.get("waterBandStepIncreaseM", 16)),
         "waterBandStepGrowthPower": opts.get("waterBandStepGrowthPower", ocean.get("waterBandStepGrowthPower", 2)),
-        "waterBandUseLegacyBands": opts.get("waterBandUseLegacyBands", ocean.get("waterBandUseLegacyBands", False)),
+        "waterBandSmoothness": opts.get(
+            "waterBandSmoothness",
+            opts.get("waterColorSmoothness", ocean.get("waterBandSmoothness", ocean.get("waterColorSmoothness", 0.35))),
+        ),
+        "waterColorSmoothness": opts.get(
+            "waterColorSmoothness",
+            opts.get("waterBandSmoothness", ocean.get("waterColorSmoothness", ocean.get("waterBandSmoothness", 0.35))),
+        ),
         "oceanFoamRimFadeM": opts.get("oceanFoamRimFadeM", ocean.get("oceanFoamRimFadeM", 48)),
         "waterColorSteps": opts.get("waterColorSteps", ocean.get("waterColorSteps", 6)),
         "seafloorNoiseM": opts.get("seafloorNoiseM", ocean.get("seafloorNoiseM", 6)),
@@ -135,15 +137,10 @@ def normalized_export_options(options: Dict[str, Any] | None = None) -> Dict[str
 
 def derive_island_data(height_m: np.ndarray, options: Dict[str, Any] | None = None) -> Dict[str, Any]:
     opts = normalized_export_options(options)
-    footprint_w = float(opts.get("widthM"))
-    footprint_d = float(opts.get("depthM"))
-    opts["_bandsFootprintWidthM"] = footprint_w
-    opts["_bandsFootprintDepthM"] = footprint_d
     island_mask = refine_island_mask_for_ocean(height_m, derive_island_mask(height_m, opts), opts)
     shoreline_mask = compute_shoreline_mask(island_mask)
     bathy = generate_ocean_bathymetry(height_m, island_mask, opts)
-    bathy_footprint = crop_bathymetry_to_footprint(bathy, height_m.shape[0], height_m.shape[1])
-    material = generate_material_maps(height_m, island_mask, bathy_footprint["shore_distance_m"], opts)
+    material = generate_material_maps(height_m, island_mask, bathy["shore_distance_m"], opts)
     return {
         "options": opts,
         "island_mask": island_mask,
@@ -158,17 +155,12 @@ def derived_maps_payload(height_m: np.ndarray, options: Dict[str, Any] | None = 
     opts = data["options"]
     bathy = data["bathymetry"]
     material = data["materials"]
-    max_dist = max(float(opts.get("deepWaterDistanceM", 1800)), float(opts.get("oceanRadiusM", 6500)))
-    meta = _metadata(data)
-    bands = meta.get("bandsMap", {})
+    max_dist = max_shore_distance_scale_m(opts)
 
     return {
-        "width": int(bathy["water_color_rgb"].shape[1]),
-        "height": int(bathy["water_color_rgb"].shape[0]),
-        "bandsPlaneWidthM": float(bands.get("planeWidthM", opts.get("widthM", 0))),
-        "bandsPlaneDepthM": float(bands.get("planeDepthM", opts.get("depthM", 0))),
-        "oceanRadiusM": float(opts.get("oceanRadiusM", 0)),
-        "metadata": meta,
+        "width": int(height_m.shape[1]),
+        "height": int(height_m.shape[0]),
+        "metadata": _metadata(data),
         "islandMask": image_to_data_url(_mask_png(data["island_mask"])),
         "shorelineMask": image_to_data_url(_mask_png(data["shoreline_mask"])),
         "oceanDiscMask": image_to_data_url(_mask_png(bathy["ocean_disc_mask"])),
@@ -189,35 +181,23 @@ def _metadata(data: Dict[str, Any]) -> Dict[str, Any]:
     opts = data["options"]
     bathy = data["bathymetry"]
     island = data["island_mask"]
-    fh, fw = island.shape
-    bh, bw = bathy["water_color_rgb"].shape[:2]
-    footprint_w = float(opts.get("_bandsFootprintWidthM", opts.get("widthM")))
-    footprint_d = float(opts.get("_bandsFootprintDepthM", opts.get("depthM")))
-    band_plane_w = footprint_w * (bw - 1) / max(1, fw - 1)
-    band_plane_d = footprint_d * (bh - 1) / max(1, fh - 1)
     return {
         "units": "meters",
         "world": {
-            "widthM": footprint_w,
-            "depthM": footprint_d,
+            "widthM": float(opts.get("widthM")),
+            "depthM": float(opts.get("depthM")),
             "maxHeightM": float(opts.get("maxHeightM")),
             "verticalExaggeration": float(opts.get("verticalScale")),
             "seaLevelM": float(opts.get("seaLevelM")),
         },
-        "bandsMap": {
-            "widthPx": int(bw),
-            "heightPx": int(bh),
-            "planeWidthM": round(band_plane_w, 2),
-            "planeDepthM": round(band_plane_d, 2),
-        },
         "ocean": {
             "radiusM": float(opts.get("oceanRadiusM")),
             "maxDepthM": float(opts.get("maxOceanDepthM")),
-            "shoreShelfWidthM": float(opts.get("shoreShelfWidthM")),
-            "shallowShelfM": float(opts.get("shallowShelfM")),
-            "midShelfM": float(opts.get("midShelfM")),
-            "deepWaterDistanceM": float(opts.get("deepWaterDistanceM")),
-            "deepStartM": float(opts.get("deepStartM")),
+            "waterBandStepM": float(opts.get("waterBandStepM", 12)),
+            "waterBandStepIncreaseM": float(opts.get("waterBandStepIncreaseM", 16)),
+            "waterBandStepGrowthPower": float(opts.get("waterBandStepGrowthPower", 2)),
+            "waterBandEdgesM": [float(v) for v in band_edges_from_options(opts)],
+            "shoreDistanceMaxM": max_shore_distance_scale_m(opts),
             "depthCurveExponent": float(opts.get("depthCurveExponent")),
             "coastlineSkirtDepthM": float(opts.get("coastlineSkirtDepthM")),
             "bathymetrySmoothPx": int(opts.get("bathymetrySmoothPx")),
@@ -359,7 +339,7 @@ def build_web_island_export(height_m: np.ndarray, options: Dict[str, Any] | None
         zf.writestr(files["islandMask"], _png_bytes(_mask_png(data["island_mask"])))
         zf.writestr(files["shorelineMask"], _png_bytes(_mask_png(data["shoreline_mask"])))
         zf.writestr(files["oceanDiscMask"], _png_bytes(_mask_png(bathy["ocean_disc_mask"])))
-        zf.writestr(files["shoreDistance"], _png_bytes(_u16_distance_png(bathy["shore_distance_m"], max(opts["deepWaterDistanceM"], opts["oceanRadiusM"]))))
+        zf.writestr(files["shoreDistance"], _png_bytes(_u16_distance_png(bathy["shore_distance_m"], max_shore_distance_scale_m(opts))))
         zf.writestr(files["world"], json.dumps(manifest["world"] | {"ocean": manifest["ocean"], "detail": manifest["detail"]}, indent=2, sort_keys=True))
         zf.writestr(files["materials"], json.dumps(manifest["materials"], indent=2, sort_keys=True))
         zf.writestr(files["structures"], json.dumps({"version": 1, "instances": []}, indent=2))
@@ -382,7 +362,7 @@ def build_game_island_export(height_m: np.ndarray, options: Dict[str, Any] | Non
     bathy = data["bathymetry"]
     mats = data["materials"]
     max_height = float(opts["maxHeightM"])
-    max_dist = max(float(opts["deepWaterDistanceM"]), float(opts["oceanRadiusM"]))
+    max_dist = max_shore_distance_scale_m(opts)
 
     lods = [
         ("lod0", "game_export_high", 3, 257),

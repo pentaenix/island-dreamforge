@@ -1,19 +1,14 @@
 /**
  * Three independent layers (bottom → top):
  * 1. Circle — solid deepest color (disc diameter slider only).
- * 2. Rectangle — band reach plane; texture matches plane 1:1 (more pixels, not scaled art).
+ * 2. Rectangle — island footprint, exported band map texture (0–1 UV, map-sized plane).
  * 3. Square — foam (disc diameter; separate from band map).
  */
 
 import * as THREE from 'three';
 import { buildFoamLayerTextureUrl, buildWaterBandsMapUrl } from './waterSurfaceComposite.js';
 import { ISLAND_WATER_HEX } from './waterPalette.js';
-import {
-  getBandsPlaneDimsM,
-  getBandsTexDimsPx,
-  getOceanDiscRadiusM,
-  getWorldDimsM,
-} from './worldSettings.js';
+import { getOceanDiscRadiusM, getWorldDimsM } from './worldSettings.js';
 
 const DEEP_OCEAN_HEX = ISLAND_WATER_HEX[ISLAND_WATER_HEX.length - 1];
 
@@ -75,9 +70,9 @@ export async function createWaterStack3d({
   waterColorUrl,
   waterDepthUrl,
   foamMaskUrl,
+  shoreDistanceUrl = '',
+  shoreDistanceMaxM = 0,
   heights,
-  bandsPlaneWidthM = 0,
-  bandsPlaneDepthM = 0,
 }) {
   if (!heights?.length || rows < 2 || cols < 2) return null;
 
@@ -107,23 +102,19 @@ export async function createWaterStack3d({
   group.add(baseMesh);
 
   if (waterColorUrl) {
-    const target = getBandsPlaneDimsM(world, mapSizePx, ocean);
-    const planeW = Number(bandsPlaneWidthM) > 0 ? Number(bandsPlaneWidthM) : target.width;
-    const planeD = Number(bandsPlaneDepthM) > 0 ? Number(bandsPlaneDepthM) : target.depth;
-
     const bandsUrl = await buildWaterBandsMapUrl({
       rows,
       cols,
       heights,
       mapW,
       mapD,
-      bandsPlaneWidthM: planeW,
-      bandsPlaneDepthM: planeD,
       seaLevelM: seaLevel,
       maxHeightM,
       worldSettings: world,
+      oceanSettings: ocean,
       waterColorUrl,
-      waterDepthUrl: waterDepthUrl || '',
+      shoreDistanceUrl: shoreDistanceUrl || '',
+      shoreDistanceMaxM,
       bandSmoothness: bandSmooth,
     }).catch((err) => {
       console.warn('Water bands map failed', err);
@@ -131,28 +122,7 @@ export async function createWaterStack3d({
     });
 
     const bandsTex = await loadTexture(bandsUrl || waterColorUrl);
-    const texW = bandsTex.image?.width ?? cols;
-    const texH = bandsTex.image?.height ?? rows;
-    const expected = getBandsTexDimsPx(rows, cols, world, mapSizePx, ocean);
-    const isExpandedExport =
-      texW >= expected.outCols - 1 && texH >= expected.outRows - 1;
-
-    bandsTex.wrapS = THREE.ClampToEdgeWrapping;
-    bandsTex.wrapT = THREE.ClampToEdgeWrapping;
-    if (!isExpandedExport && planeW > mapW + 1) {
-      const repeatX = mapW / planeW;
-      const repeatY = mapD / planeD;
-      bandsTex.repeat.set(repeatX, repeatY);
-      bandsTex.offset.set((1 - repeatX) / 2, (1 - repeatY) / 2);
-      console.warn(
-        'Band map is island-sized; regenerate derived maps for full band-reach canvas',
-      );
-    } else {
-      bandsTex.repeat.set(1, 1);
-      bandsTex.offset.set(0, 0);
-    }
-
-    const bandsGeo = new THREE.PlaneGeometry(planeW, planeD, 1, 1);
+    const bandsGeo = new THREE.PlaneGeometry(mapW, mapD, 1, 1);
     const bandsMat = layerMaterial({
       map: bandsTex,
       polygonOffset: true,

@@ -344,30 +344,22 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   worldSettings = { widthM: 1480, depthM: 1086, verticalExaggeration: 1 },
   waterDepthUrl = '',
   waterColorUrl = '',
+  shoreDistanceUrl = '',
+  shoreDistanceMaxM = 0,
   foamMaskUrl = '',
   waterMaskUrl = '',
   islandMaskUrl = '',
   materialPreviewUrl = '',
   showSeafloor = false,
   oceanSettings = {},
-  bandsPlaneWidthM = 0,
-  bandsPlaneDepthM = 0,
 }, ref) {
   const mountRef = useRef(null);
   const hudRef = useRef(null);
   const heightUrlRef = useRef(heightUrl);
   heightUrlRef.current = heightUrl;
   const viewportReadyRef = useRef(false);
-  const propsRef = useRef({
-    tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings,
-    waterDepthUrl, waterColorUrl, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl,
-    showSeafloor, oceanSettings, bandsPlaneWidthM, bandsPlaneDepthM,
-  });
-  propsRef.current = {
-    tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings,
-    waterDepthUrl, waterColorUrl, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl,
-    showSeafloor, oceanSettings, bandsPlaneWidthM, bandsPlaneDepthM,
-  };
+  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings });
+  propsRef.current = { tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings };
 
   const stateRef = useRef({
     rows: 0, cols: 0, heights: null, islandMask: null, materialPreview: null,
@@ -589,11 +581,6 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     worldSettings?.depthM,
     oceanSettings?.oceanRadiusM,
     oceanSettings?.oceanRadiusAuto,
-    oceanSettings?.waterMapRadiusM,
-    oceanSettings?.waterMapRadiusAuto,
-    oceanSettings?.shoreShelfWidthM,
-    oceanSettings?.midWaterDistanceM,
-    oceanSettings?.deepWaterDistanceM,
     oceanSettings?.waterColorSteps,
     oceanSettings?.waterBandSmoothness,
     oceanSettings?.waterNoiseStrength,
@@ -603,12 +590,12 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     oceanSettings?.oceanFoamRimFadeM,
     oceanSettings?.waterBandStepM,
     oceanSettings?.waterBandStepIncreaseM,
+    oceanSettings?.waterBandStepGrowthPower,
     foamMaskUrl,
     waterMaskUrl,
     waterColorUrl,
-    waterDepthUrl,
-    bandsPlaneWidthM,
-    bandsPlaneDepthM,
+    shoreDistanceUrl,
+    shoreDistanceMaxM,
   ]);
   useEffect(() => { const s = stateRef.current; if (s.scene && s.mesh) renderOverlayObjects(s, layers || []); }, [layers, heightUrl, maxHeightM]);
 
@@ -989,10 +976,10 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       maxHeightM: Number(propsRef.current.maxHeightM || 500),
       waterColorUrl: propsRef.current.waterColorUrl,
       waterDepthUrl: propsRef.current.waterDepthUrl,
+      shoreDistanceUrl: propsRef.current.shoreDistanceUrl,
+      shoreDistanceMaxM: propsRef.current.shoreDistanceMaxM,
       foamMaskUrl: propsRef.current.foamMaskUrl,
       heights: s.heights,
-      bandsPlaneWidthM: propsRef.current.bandsPlaneWidthM,
-      bandsPlaneDepthM: propsRef.current.bandsPlaneDepthM,
     });
     if (!group) return null;
     group.position.y = Number(seaLevel || 0);

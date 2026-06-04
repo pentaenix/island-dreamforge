@@ -12,22 +12,6 @@ export function isDryLandM(heights, idx, seaLevelM, maxHeightM, worldSettings) {
   return y > Number(seaLevelM || 0) + 0.25;
 }
 
-/** Dry land at world (x,z) on the island heightmap; outside the map footprint = open water. */
-export function isDryLandAtWorld(wx, wz, rows, cols, heights, seaLevelM, maxHeightM, worldSettings, mapW, mapD) {
-  const widthM = Number(mapW ?? worldSettings?.widthM ?? 1480);
-  const depthM = Number(mapD ?? worldSettings?.depthM ?? 1086);
-  if (wx < -widthM / 2 || wx > widthM / 2 || wz < -depthM / 2 || wz > depthM / 2) {
-    return false;
-  }
-  const col = (wx / widthM + 0.5) * (cols - 1);
-  const row = (wz / depthM + 0.5) * (rows - 1);
-  const c0 = Math.floor(col);
-  const r0 = Math.floor(row);
-  const idx = r0 * cols + c0;
-  if (idx < 0 || idx >= heights.length) return false;
-  return isDryLandM(heights, idx, seaLevelM, maxHeightM, worldSettings);
-}
-
 export function isWetAtWorld(
   wx,
   wz,

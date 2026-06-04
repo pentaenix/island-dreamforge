@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from .bathymetry import expand_grid_for_bands_reach, generate_bathymetry
+from .bathymetry import generate_bathymetry
 from .distance_field import euclidean_distance_to_land
 
 
@@ -268,10 +268,8 @@ def generate_ocean_bathymetry(
     island_mask: np.ndarray,
     options: Dict[str, Any] | None = None,
 ) -> Dict[str, np.ndarray]:
-    """Bathymetry on an expanded plane (band reach) at the same meters-per-pixel as the island map."""
-    opts = options or {}
-    h, mask, opts_exp = expand_grid_for_bands_reach(height, island_mask, opts)
-    return generate_bathymetry(h, mask, opts_exp)
+    """Create seafloor height and water-depth maps that deepen away from land."""
+    return generate_bathymetry(height, island_mask, options or {})
 
 
 def _slope_norm(height: np.ndarray, pixel_size_m: float) -> np.ndarray:

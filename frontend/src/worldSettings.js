@@ -1,5 +1,7 @@
 /** Island world scale + mesh density — shared by Heights UI, viewport, and export. */
 
+import { defaultBandEdgesM, totalBandReachM } from './waterPalette.js';
+
 /** Design-time reference width — color sample heights are authored at this footprint. */
 export const REFERENCE_ISLAND_WIDTH_M = 1480;
 
@@ -123,15 +125,22 @@ export function getOceanDiscRadiusM(worldSettings, mapSizePx = {}, oceanSettings
   return getAutoOceanDiscRadiusM(worldSettings, mapSizePx);
 }
 
+/** Max shore distance used when encoding shore-distance preview maps (m). */
+export function maxShoreDistanceScaleM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
+  const edges = defaultBandEdgesM(oceanSettings);
+  const oceanR = getWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings);
+  return Math.max(1, oceanR, edges[edges.length - 1] || 1);
+}
+
 /** Auto radius for bathymetry / derived band maps — generous vs island footprint. */
 export function getAutoWaterMapRadiusM(worldSettings, mapSizePx = {}, exportSettings = {}) {
   const footprint = getOceanFootprintRadiusM(worldSettings, mapSizePx);
-  const deep = Number(exportSettings.deepWaterDistanceM ?? exportSettings.deepStartM ?? 150);
+  const bandReach = totalBandReachM(exportSettings);
   const span = Math.max(
     Number(worldSettings?.widthM ?? DEFAULT_WORLD_SETTINGS.widthM),
     getDerivedDepthM(worldSettings, mapSizePx),
   );
-  return Math.max(footprint * 1.15, deep * 2.5, span * 0.72);
+  return Math.max(footprint * 1.15, bandReach * 2.5, span * 0.72);
 }
 
 /**
@@ -147,59 +156,6 @@ export function getWaterMapRadiusM(worldSettings, mapSizePx = {}, oceanSettings 
     return Math.max(50, manual);
   }
   return getAutoWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings);
-}
-
-/**
- * 3D band rectangle footprint (m) — island map size expanded up to band reach diameter.
- * Texture UV maps the exported cols×rows image onto the centered island region.
- */
-export function getBandsPlaneDimsM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
-  const mapW = Math.max(50, Number(worldSettings?.widthM || DEFAULT_WORLD_SETTINGS.widthM));
-  const mapD = Math.max(50, getDerivedDepthM(worldSettings, mapSizePx));
-  const reachD = Math.max(100, getWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings) * 2);
-  return {
-    mapW,
-    mapD,
-    width: Math.max(mapW, reachD),
-    depth: Math.max(mapD, reachD),
-  };
-}
-
-/** World footprint (m) for a band texture — 1:1 with export pixels, not the reach slider alone. */
-export function bandsPlaneFromTexPx(texCols, texRows, terrainCols, terrainRows, mapW, mapD) {
-  const tc = Math.max(2, Number(texCols) || 2);
-  const tr = Math.max(2, Number(texRows) || 2);
-  const cols = Math.max(2, Number(terrainCols) || 2);
-  const rows = Math.max(2, Number(terrainRows) || 2);
-  const w = Math.max(50, Number(mapW) || 1480);
-  const d = Math.max(50, Number(mapD) || 1086);
-  return {
-    width: w * (tc - 1) / Math.max(1, cols - 1),
-    depth: d * (tr - 1) / Math.max(1, rows - 1),
-    texCols: tc,
-    texRows: tr,
-  };
-}
-
-/** Band texture pixels at island meters-per-pixel — grows canvas, does not scale art. */
-export function getBandsTexDimsPx(rows, cols, worldSettings, mapSizePx = {}, oceanSettings = {}) {
-  const { mapW, mapD, width: planeW, depth: planeD } = getBandsPlaneDimsM(
-    worldSettings,
-    mapSizePx,
-    oceanSettings,
-  );
-  const outCols = Math.max(cols, Math.round(((cols - 1) * planeW) / mapW) + 1);
-  const outRows = Math.max(rows, Math.round(((rows - 1) * planeD) / mapD) + 1);
-  return {
-    mapW,
-    mapD,
-    planeW,
-    planeD,
-    outCols,
-    outRows,
-    padC: Math.floor((outCols - cols) / 2),
-    padR: Math.floor((outRows - rows) / 2),
-  };
 }
 
 export function getMetersPerPixel(worldSettings, mapSizePx = {}) {

@@ -46,7 +46,6 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
   const bandStepInc = Number(settings.waterBandStepIncreaseM ?? 16);
   const bandGrowthPower = Number(settings.waterBandStepGrowthPower ?? 2);
   const bandEdges = defaultBandEdgesM({
-    ...settings,
     waterBandStepM: bandStepM,
     waterBandStepIncreaseM: bandStepInc,
     waterBandStepGrowthPower: bandGrowthPower,
@@ -86,7 +85,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
 
       <h3>Seafloor band reach</h3>
       <p className="small muted">
-        Requests a full-size band map from the server (same scale as the island). The 3D plane updates when derived maps finish regenerating (~½ s after you move the slider).
+        How far the bathymetry algorithm paints depth bands on the island map. Regenerate derived maps after changes. The 3D band plane stays island-sized.
       </p>
       <label className="checkline">
         <input
@@ -94,7 +93,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
           checked={mapAutoMode}
           onChange={(e) => patch({ waterMapRadiusAuto: e.target.checked })}
         />
-        Auto band reach from island + deep-water settings
+        Auto band reach from island + band widths
       </label>
       <Slider
         label="Band reach diameter"
@@ -128,7 +127,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
 
       <h4>Depth bands (from shore)</h4>
       <p className="small muted">
-        Each band width = shore step + increase × band² (outer bands grow much wider). Regenerate derived maps after changes.
+        Each band width = shore step + increase × band² (outer bands grow much wider). Island maps refresh automatically on this tab; 3D uses the latest derived maps on step 4.
       </p>
       <Slider
         label="First band width (shore)"
@@ -137,7 +136,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
         max={200}
         step={1}
         suffix="m"
-        onChange={(v) => patch({ waterBandStepM: v, waterBandUseLegacyBands: false })}
+        onChange={(v) => patch({ waterBandStepM: v })}
       />
       <Slider
         label="Step increase per band"
@@ -146,7 +145,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
         max={400}
         step={2}
         suffix="m"
-        onChange={(v) => patch({ waterBandStepIncreaseM: v, waterBandUseLegacyBands: false })}
+        onChange={(v) => patch({ waterBandStepIncreaseM: v })}
       />
       <p className="small muted">
         Band widths (m): {bandWidths.map((w) => Math.round(w)).join(' → ')} · total reach ~{totalBandReachM} m
@@ -180,14 +179,6 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
         onChange={(v) => patch({ oceanFoamRimFadeM: v })}
       />
       <p className="small muted">Fades foam and waves near the ocean circle edge so they do not stretch on the rim.</p>
-
-      <details>
-        <summary>Legacy band distances</summary>
-        <Slider label="Pale shore band" value={settings.shallowShelfM || settings.shoreShelfWidthM} min={4} max={80} step={1} suffix="m"         onChange={(v) => patch({ shallowShelfM: v, shoreShelfWidthM: v, waterBandUseLegacyBands: true })} />
-        <Slider label="Turquoise shelf end" value={settings.midShelfM || settings.midWaterDistanceM} min={20} max={200} step={2} suffix="m" onChange={(v) => patch({ midShelfM: v, midWaterDistanceM: v, waterBandUseLegacyBands: true })} />
-        <Slider label="Deep water start" value={settings.deepStartM || settings.deepWaterDistanceM} min={60} max={600} step={5} suffix="m" onChange={(v) => patch({ deepStartM: v, deepWaterDistanceM: v, waterBandUseLegacyBands: true })} />
-        <p className="small muted">Clears step mode when adjusted. Re-enable step sliders above to use step + increase again.</p>
-      </details>
 
       <details>
         <summary>Export-only</summary>

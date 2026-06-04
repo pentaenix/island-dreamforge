@@ -81,23 +81,18 @@ export function defaultBandEdgesM(options = {}) {
     return [...custom].map(Number).sort((a, b) => a - b);
   }
 
-  if (!options.waterBandUseLegacyBands) {
-    return bandEdgesFromSteps(
-      options.waterBandStepM ?? 12,
-      options.waterBandStepIncreaseM ?? 8,
-      NUM_WATER_BANDS,
-      options.waterBandStepGrowthPower ?? 2,
-    );
-  }
+  return bandEdgesFromSteps(
+    options.waterBandStepM ?? 12,
+    options.waterBandStepIncreaseM ?? 8,
+    NUM_WATER_BANDS,
+    options.waterBandStepGrowthPower ?? 2,
+  );
+}
 
-  const shallow = Number(options.shallowShelfM ?? options.shoreShelfWidthM ?? 24);
-  const mid = Number(options.midShelfM ?? options.midWaterDistanceM ?? 70);
-  const deep = Number(options.deepStartM ?? options.deepWaterDistanceM ?? 150);
-  const edges = [0, shallow * 0.2, shallow, mid * 0.65, mid, deep, deep + 80];
-  for (let i = 1; i < edges.length; i++) {
-    if (edges[i] <= edges[i - 1]) edges[i] = edges[i - 1] + 1;
-  }
-  return edges;
+/** Total meters from shore covered by step + increase bands (for auto band-reach sizing). */
+export function totalBandReachM(options = {}) {
+  const edges = defaultBandEdgesM(options);
+  return edges[edges.length - 1] || 0;
 }
 
 /** Map meters-from-shore to 0..1; each band gets equal palette span, widths grow by step + increase. */

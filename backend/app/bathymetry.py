@@ -8,90 +8,9 @@ from .distance_field import euclidean_distance_to_land
 from .water_band_steps import band_edges_from_options, distance_to_bathy01_bands, ocean_disc_rim_fade
 from .water_palette import color_ramp
 
-# Default band edges in meters from shore (tight around island)
-DEFAULT_BAND_EDGES_M = (0.0, 10.0, 24.0, 48.0, 78.0, 120.0, 185.0)
-
-
 def smoothstep(a: float, b: float, x: np.ndarray) -> np.ndarray:
     t = np.clip((x - a) / max(1e-6, b - a), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
-
-
-def bands_plane_dims_m(options: Dict[str, Any]) -> Tuple[float, float, float, float]:
-    """Island footprint vs band-reach plane (m) — reach extends canvas, not UV scale."""
-    width_m = float(options.get("widthM", options.get("worldWidthM", 9000)) or 9000)
-    depth_m = float(options.get("depthM", options.get("worldDepthM", width_m)) or width_m)
-    radius = float(options.get("oceanRadiusM", 650) or 650)
-    explicit_w = float(options.get("bandsPlaneWidthM", 0) or 0)
-    explicit_d = float(options.get("bandsPlaneDepthM", 0) or 0)
-    plane_w = explicit_w if explicit_w > width_m else max(width_m, radius * 2.0)
-    plane_d = explicit_d if explicit_d > depth_m else max(depth_m, radius * 2.0)
-    return width_m, depth_m, plane_w, plane_d
-
-
-def _paste_center_into_bands_plane(
-    source: np.ndarray,
-    width_m: float,
-    depth_m: float,
-    plane_w: float,
-    plane_d: float,
-    *,
-    fill: float = 0.0,
-) -> np.ndarray:
-    """Paste island grid into center of larger canvas at original pixel size (no scale)."""
-    rows, cols = source.shape
-    out_cols = max(cols, int(round((cols - 1) * (plane_w / width_m))) + 1)
-    out_rows = max(rows, int(round((rows - 1) * (plane_d / depth_m))) + 1)
-    pad_c = (out_cols - cols) // 2
-    pad_r = (out_rows - rows) // 2
-    if source.dtype == bool:
-        out = np.zeros((out_rows, out_cols), dtype=bool)
-    else:
-        out = np.full((out_rows, out_cols), fill, dtype=source.dtype)
-    out[pad_r : pad_r + rows, pad_c : pad_c + cols] = source
-    return out
-
-
-def expand_grid_for_bands_reach(
-    height: np.ndarray,
-    island_mask: np.ndarray,
-    options: Dict[str, Any],
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    width_m, depth_m, plane_w, plane_d = bands_plane_dims_m(options)
-    if plane_w <= width_m + 0.5 and plane_d <= depth_m + 0.5:
-        return height, island_mask, options
-    h_new = _paste_center_into_bands_plane(height.astype(np.float32), width_m, depth_m, plane_w, plane_d, fill=0.0)
-    m_new = _paste_center_into_bands_plane(island_mask.astype(bool), width_m, depth_m, plane_w, plane_d, fill=False)
-    opts_out = dict(options)
-    opts_out["_bandsFootprintWidthM"] = width_m
-    opts_out["_bandsFootprintDepthM"] = depth_m
-    opts_out["widthM"] = plane_w
-    opts_out["depthM"] = plane_d
-    return h_new, m_new, opts_out
-
-
-def crop_bathymetry_to_footprint(
-    bathy: Dict[str, np.ndarray],
-    footprint_rows: int,
-    footprint_cols: int,
-) -> Dict[str, np.ndarray]:
-    ref = bathy.get("water_color_rgb")
-    if ref is None:
-        return bathy
-    full_rows, full_cols = ref.shape[:2]
-    if full_rows == footprint_rows and full_cols == footprint_cols:
-        return bathy
-    pad_r = max(0, (full_rows - footprint_rows) // 2)
-    pad_c = max(0, (full_cols - footprint_cols) // 2)
-    y1 = pad_r + footprint_rows
-    x1 = pad_c + footprint_cols
-    out: Dict[str, np.ndarray] = {}
-    for key, val in bathy.items():
-        if isinstance(val, np.ndarray) and val.ndim >= 2 and val.shape[0] == full_rows and val.shape[1] == full_cols:
-            out[key] = val[pad_r:y1, pad_c:x1] if val.ndim == 2 else val[pad_r:y1, pad_c:x1, ...]
-        else:
-            out[key] = val
-    return out
 
 
 def world_coordinates(rows: int, cols: int, options: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -143,26 +62,6 @@ def value_noise(shape: Tuple[int, int], scale_px: float, seed: int) -> np.ndarra
     c = grid[y1[:, None], x0[None, :]]
     d = grid[y1[:, None], x1[None, :]]
     return ((a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty) * 2.0 - 1.0
-
-
-def distance_to_bathymetry01(
-    shore_distance_m: np.ndarray,
-    water_mask: np.ndarray,
-    band_edges_m: List[float],
-) -> np.ndarray:
-    """Map shore distance (meters) to 0..1 using discrete bands like map art."""
-    dist = np.asarray(shore_distance_m, dtype=np.float32)
-    water = np.asarray(water_mask, dtype=bool)
-    edges = band_edges_m
-    n = max(1, len(edges) - 1)
-    bathy = np.zeros(dist.shape, dtype=np.float32)
-    for i in range(n):
-        lo = edges[i]
-        hi = edges[i + 1] if i + 1 < len(edges) else edges[-1] + 1e6
-        mask = water & (dist >= lo) & (dist < hi)
-        bathy[mask] = i / max(1, n - 1)
-    bathy[water & (dist >= edges[-1])] = 1.0
-    return np.clip(bathy, 0.0, 1.0).astype(np.float32)
 
 
 def _water_band_smoothness(opts: Dict[str, Any]) -> float:
