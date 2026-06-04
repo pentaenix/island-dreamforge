@@ -4,6 +4,7 @@
  */
 
 import * as THREE from 'three';
+import { resolveMaterialPalette } from './materialColors.js';
 import { settingsForViewDistance } from './textureSettings.js';
 import { textureNormsFromSettings } from './textureNorms.js';
 
@@ -32,7 +33,8 @@ function fbm(x, y, seed = 0) {
   return f;
 }
 
-const FALLBACK = {
+/** @deprecated use resolveMaterialPalette(settings) — kept for tests/imports */
+export const FALLBACK = {
   sand: [226, 207, 146],
   grass: [96, 154, 75],
   forest: [48, 118, 56],
@@ -169,6 +171,7 @@ export function paintProceduralTerrainTexture(opts) {
   const macroTiling = Math.max(24, Number(settings.macroTilingM ?? 110));
   const macroV = Number(settings.macroVariation ?? 0.48);
   const aerial = Number(settings.aerialSoftness ?? 0.32);
+  const palette = resolveMaterialPalette(settings);
   const img = new ImageData(size, size);
   const normalImg = new ImageData(size, size);
   const data = img.data;
@@ -198,34 +201,38 @@ export function paintProceduralTerrainTexture(opts) {
       const worldZ = (r / Math.max(1, rows - 1)) * worldD;
       const tu = (worldX % tilingM) / tilingM;
       const tv = (worldZ % tilingM) / tilingM;
-      const pick = (id, u, v, fb) => (sampleMaterial ? sampleMaterial(id, u, v, worldX, worldZ) : null) || tileRgb(fb, u, v);
-      const sandRgb = pick('sand', tu, tv, FALLBACK.sand);
-      const grassRgb = pick('grass', tu + 0.11, tv + 0.07, FALLBACK.grass);
-      const treeRgb = pick('trees', tu + 0.19, tv + 0.13, FALLBACK.forest);
-      const wetRgb = pick('wet_sand', tu + 0.03, tv + 0.05, FALLBACK.wetSand);
-      const rockRgb = pick('rock', tu * 0.5, tv * 0.5, FALLBACK.rock);
-      const gravelRgb = pick('gravel', tu * 0.35, tv * 0.35, FALLBACK.gravel);
+      const pick = (id, u, v, fbKey) => {
+        const fb = palette[fbKey] || FALLBACK[fbKey] || palette.grass;
+        const sampled = sampleMaterial ? sampleMaterial(id, u, v, worldX, worldZ) : null;
+        return sampled || tileRgb(fb, u, v);
+      };
+      const sandRgb = pick('sand', tu, tv, 'sand');
+      const grassRgb = pick('grass', tu + 0.11, tv + 0.07, 'grass');
+      const treeRgb = pick('trees', tu + 0.19, tv + 0.13, 'forest');
+      const wetRgb = pick('wet_sand', tu + 0.03, tv + 0.05, 'wetSand');
+      const rockRgb = pick('rock', tu * 0.5, tv * 0.5, 'rock');
+      const gravelRgb = pick('gravel', tu * 0.35, tv * 0.35, 'gravel');
 
       let color;
       let normalRgb = [128, 128, 255];
       if (!land) {
-        color = [...FALLBACK.water];
+        color = [...palette.water];
       } else if (h < seaNorm + wetNorm) {
         color = mixRgb(wetRgb, sandRgb, shore);
       } else if (h < seaNorm + sandNorm) {
         color = mixRgb(sandRgb, grassRgb, smoothstep(seaNorm + wetNorm, seaNorm + sandNorm, h));
       } else {
-        const canopyDark = mixRgb(treeRgb, FALLBACK.treesDark, 0.35 + treeNoise * 0.25);
+        const canopyDark = mixRgb(treeRgb, palette.treesDark, 0.35 + treeNoise * 0.25);
         const forestRgb = mixRgb(grassRgb, canopyDark, highForest * (0.72 + 0.28 * treeNoise));
         const gravelMix = mixRgb(forestRgb, gravelRgb, gravelT * (0.35 + 0.45 * gravelNoise));
-        const rockCol = mixRgb(rockRgb, FALLBACK.rockLight, rockNoise * 0.45 + fine * 0.1);
+        const rockCol = mixRgb(rockRgb, palette.rockLight, rockNoise * 0.45 + fine * 0.1);
         color = mixRgb(gravelMix, rockCol, rockT);
         if (rockT > 0.35) color = mixRgb(color, rockCol, Math.min(1, rockT * 1.1));
       }
 
       if (land && (macroV > 0 || aerial > 0)) {
         const macro = fbm(worldX / macroTiling, worldZ / macroTiling, 21);
-        const macroTint = mixRgb(grassRgb, sandRgb, smoothstep(0.35, 0.75, macro));
+        const macroTint = mixRgb(grassRgb, sandRgb, smoothstep(0.35, 0.75, macro)); // uses palette-driven grass/sand
         color = mixRgb(color, macroTint, macroV * (0.35 + macro * 0.4));
         const soft = [
           color[0] * 0.9 + 12,
@@ -261,7 +268,7 @@ export function paintProceduralTerrainTexture(opts) {
       if (land && highForest > 0.06 && rockT < 0.5) {
         const tuftCell = fbm(Math.floor(x / treePixel), Math.floor(y / treePixel), 77);
         const crown = smoothstep(0.38, 0.68, tuftCell) * forestBlock * highForest * (1 - rockT);
-        color = mixRgb(color, FALLBACK.treesDark, crown * 0.4);
+        color = mixRgb(color, palette.treesDark, crown * 0.4);
         color = mixRgb(color, [color[0] + 18, color[1] + 26, color[2] + 6], crown * 0.2 * (0.5 + treeNoise));
         const tgx = (fbm((x + 1) / treePixel, y / treePixel, 88) - fbm((x - 1) / treePixel, y / treePixel, 88))
           * foliageNorm * 58 * crown;

@@ -3,7 +3,7 @@ import TerrainViewport, { MATERIALS } from './TerrainViewport.jsx';
 import HeightsStudio from './HeightsStudio.jsx';
 import { SceneLayerCard } from './layerUi.jsx';
 import TexturesStudio from './TexturesStudio.jsx';
-import { DEFAULT_TEXTURE_SETTINGS } from './textureSettings.js';
+import { DEFAULT_TEXTURE_SETTINGS, normalizeTextureSettings } from './textureSettings.js';
 import ExportProfilePanel from './ExportProfilePanel.jsx';
 import WaterSettingsPanel from './WaterSettingsPanel.jsx';
 import WaterDiscPreview from './WaterDiscPreview.jsx';
@@ -392,7 +392,7 @@ export default function App() {
     setWaterMask(saved.waterMask || '');
     setOptions({ ...DEFAULT_OPTIONS, ...(saved.options || {}) });
     setWaterSettings({ ...DEFAULT_WATER_SETTINGS, ...(saved.waterSettings || {}) });
-    setTextureSettings({ ...DEFAULT_TEXTURE_SETTINGS, ...(saved.textureSettings || {}) });
+    setTextureSettings(normalizeTextureSettings(saved.textureSettings || {}));
     const restoredExport = { ...DEFAULT_EXPORT_SETTINGS, ...(saved.exportSettings || {}) };
     delete restoredExport.waterBandEdgesM;
     delete restoredExport.waterBandUseLegacyBands;
@@ -1254,7 +1254,11 @@ export default function App() {
           <button className="primary" onClick={() => viewportRef.current?.autoTexture()}>Regenerate terrain texture</button>
           <button onClick={() => viewportRef.current?.regenerateTrees()}>Regenerate forest clumps</button>
           <button onClick={() => viewportRef.current?.resetCamera()}>Reset camera</button>
-          <p className="small muted">Ocean colors: step 3 · Water. Paint applies to land only, not the water plane.</p>
+          <div className="tool-grid">
+            <button onClick={() => { const u = viewportRef.current?.getWaterTextureUrls(); if (u?.bands) downloadDataUrl(u.bands, 'sea_bands.png'); else setError('Open the 3D view and let the water build first.'); }}>Download bands PNG</button>
+            <button onClick={() => { const u = viewportRef.current?.getWaterTextureUrls(); if (u?.foam) downloadDataUrl(u.foam, 'sea_foam.png'); else setError('Open the 3D view and let the water build first.'); }}>Download foam PNG</button>
+          </div>
+          <p className="small muted">Lighting and material colors: step 2 · Textures. Ocean: step 3 · Water. Click Regenerate terrain texture after color changes.</p>
           <h3>Scene overlays</h3>
           <p className="small muted">Optional PNGs for structures, markers, and texture hints — analyzed for 3D preview and JSON export.</p>
           <div className="tool-grid">

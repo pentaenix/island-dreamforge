@@ -266,7 +266,6 @@ export async function buildFoamLayerTextureUrl({
   shoreDistanceMaxM = 0,
   heights = null,
 }) {
-  const size = 512;
   const discR = Math.max(50, discRadiusM);
   const discD = discR * 2;
   const widthM = mapW || Number(worldSettings.widthM || 1480);
@@ -275,24 +274,29 @@ export async function buildFoamLayerTextureUrl({
   const waveStrength = Number(ocean.waterNoiseStrength ?? 0.1);
   const waveScaleM = Math.max(8, Number(ocean.waterNoiseScaleM ?? 85));
   const seed = Math.round(Number(ocean.materialSeed ?? ocean.seed ?? 1337)) || 1337;
-  // Backend foam_mask is now a 0..1 presence map; apply strength + visibility gain here.
+  // Backend foam_mask is a 0..1 presence map; apply strength + a strong visibility gain here.
   const foamStrength = Math.max(0, Number(ocean.foamStrength ?? 0.22));
-  const FOAM_ALPHA_GAIN = 4.0;
+  const FOAM_ALPHA_GAIN = 6.0;
   const foamWidthM = Math.max(2, Number(ocean.foamWidthM ?? 12));
   const foamInner = Math.max(0.5, foamWidthM * 0.12);
   const maxH = getWorldMaxHeightM(maxHeightM, worldSettings);
-
-  const fw = mapSizePx.width || size;
-  const fh = mapSizePx.height || size;
 
   // Primary source: a full-precision distance-to-land field from the height grid,
   // so the surf line is crisp and width-controllable (the exported 8-bit shore
   // distance is scaled to the whole water map, leaving almost no near-shore detail).
   const mppX = widthM / Math.max(1, cols);
   const mppZ = depthM / Math.max(1, rows);
+  const mpp = Math.max(0.25, (mppX + mppZ) * 0.5);
+
+  // Match the foam canvas density to the map so a fixed-width surf line stays visible
+  // at any ocean-disc size (a constant 512px stretched over a huge disc made it vanish).
+  const size = Math.max(512, Math.min(2048, Math.round(discD / mpp)));
+  const fw = mapSizePx.width || 512;
+  const fh = mapSizePx.height || 512;
+
   let landField = null;
   if (heights && heights.length >= cols * rows && cols > 1 && rows > 1) {
-    landField = landDistanceFieldM(heights, cols, rows, seaLevelM, maxH, worldSettings, (mppX + mppZ) * 0.5);
+    landField = landDistanceFieldM(heights, cols, rows, seaLevelM, maxH, worldSettings, mpp);
   }
 
   // Fallbacks when no height grid is available.
@@ -376,8 +380,8 @@ export async function buildFoamLayerTextureUrl({
         continue;
       }
 
-      data[p] = 245;
-      data[p + 1] = 252;
+      data[p] = 255;
+      data[p + 1] = 255;
       data[p + 2] = 255;
       data[p + 3] = Math.round(Math.min(255, foam * 255));
     }

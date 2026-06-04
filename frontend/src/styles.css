@@ -493,6 +493,29 @@ button { min-height: 38px; }
 }
 .texture-mount-caption { margin-top: 8px; }
 
+.texture-color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px 12px;
+  margin: 8px 0 10px;
+}
+.texture-color-grid .color-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.82rem;
+}
+.texture-color-grid .color-field input[type="color"] {
+  width: 40px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+}
+
 .height-overlays-panel {
   margin: 12px 0;
   border: 1px solid rgba(255,255,255,.08);

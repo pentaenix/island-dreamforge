@@ -1,4 +1,6 @@
 import React from 'react';
+import { DEFAULT_DIORAMA_LIGHTING } from './dioramaLighting.js';
+import { MATERIAL_COLOR_DEFAULTS, MATERIAL_COLOR_LABELS } from './materialColors.js';
 import { Slider } from './studioUi.jsx';
 import TextureSwatchPreview from './TextureSwatchPreview.jsx';
 import { MATERIALS } from './TerrainViewport.jsx';
@@ -12,7 +14,17 @@ export default function TexturesStudio({
   seaLevelM = 0,
 }) {
   const patch = (next) => setSettings((prev) => ({ ...prev, ...next }));
+  const patchLighting = (key, value) => setSettings((prev) => ({
+    ...prev,
+    dioramaLighting: { ...DEFAULT_DIORAMA_LIGHTING, ...(prev.dioramaLighting || {}), [key]: value },
+  }));
+  const patchMaterialColor = (id, hex) => setSettings((prev) => ({
+    ...prev,
+    materialColors: { ...MATERIAL_COLOR_DEFAULTS, ...(prev.materialColors || {}), [id]: hex },
+  }));
   const sandCap = Math.max(8, Math.round(Number(maxHeightM || 500) * 0.35));
+  const light = { ...DEFAULT_DIORAMA_LIGHTING, ...(settings.dioramaLighting || {}) };
+  const matColors = { ...MATERIAL_COLOR_DEFAULTS, ...(settings.materialColors || {}) };
 
   return (
     <section className="texture-stage">
@@ -30,6 +42,68 @@ export default function TexturesStudio({
           <Slider label="Macro scale" value={settings.macroTilingM ?? 110} min={40} max={280} step={5} suffix="m" onChange={(v) => patch({ macroTilingM: v })} />
           <Slider label="Aerial softness" value={settings.aerialSoftness ?? 0.32} min={0} max={0.7} step={0.01} onChange={(v) => patch({ aerialSoftness: v })} />
           <Slider label="Far coarseness" value={settings.distantPixelBoost ?? 0.55} min={0} max={1.2} step={0.02} onChange={(v) => patch({ distantPixelBoost: v })} />
+        </details>
+
+        <details open>
+          <summary>Diorama lighting</summary>
+          <p className="small muted">
+            Same lights for the demo mount and the island in step 5. Lower sun and env reflection if the island looks washed out or neon green.
+          </p>
+          <Slider label="Sun intensity" value={light.sunIntensity} min={0.2} max={3} step={0.05} onChange={(v) => patchLighting('sunIntensity', v)} />
+          <Slider label="Exposure" value={light.exposure} min={0.6} max={2} step={0.02} onChange={(v) => patchLighting('exposure', v)} />
+          <Slider label="Sky fill (hemisphere)" value={light.hemisphereIntensity} min={0} max={1.2} step={0.02} onChange={(v) => patchLighting('hemisphereIntensity', v)} />
+          <Slider label="Env map reflection" value={light.envMapIntensity} min={0} max={1.5} step={0.02} onChange={(v) => patchLighting('envMapIntensity', v)} />
+          <Slider label="Surface roughness" value={light.roughness} min={0.5} max={1} step={0.01} onChange={(v) => patchLighting('roughness', v)} />
+          <div className="texture-color-grid">
+            <label className="color-field">
+              <span>Sun</span>
+              <input type="color" value={light.sunColor} onChange={(e) => patchLighting('sunColor', e.target.value)} />
+            </label>
+            <label className="color-field">
+              <span>Sky</span>
+              <input type="color" value={light.hemisphereSky} onChange={(e) => patchLighting('hemisphereSky', e.target.value)} />
+            </label>
+            <label className="color-field">
+              <span>Ground bounce</span>
+              <input type="color" value={light.hemisphereGround} onChange={(e) => patchLighting('hemisphereGround', e.target.value)} />
+            </label>
+          </div>
+        </details>
+
+        <details open>
+          <summary>Material colors</summary>
+          <p className="small muted">
+            Procedural palette for sand, grass, forest, rock, and gravel. The island also tints PNG swatches unless you enable procedural-only below.
+          </p>
+          <Slider
+            label="Color override strength"
+            value={Math.round((settings.materialColorStrength ?? 1) * 100)}
+            min={0}
+            max={100}
+            step={1}
+            suffix="%"
+            onChange={(v) => patch({ materialColorStrength: v / 100 })}
+          />
+          <div className="texture-color-grid">
+            {MATERIAL_COLOR_LABELS.map(({ id, label }) => (
+              <label key={id} className="color-field">
+                <span>{label}</span>
+                <input
+                  type="color"
+                  value={matColors[id] || MATERIAL_COLOR_DEFAULTS[id]}
+                  onChange={(e) => patchMaterialColor(id, e.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+          <label className="checkline">
+            <input
+              type="checkbox"
+              checked={settings.proceduralColorsOnly === true}
+              onChange={(e) => patch({ proceduralColorsOnly: e.target.checked })}
+            />
+            Procedural colors only on island (ignore bright PNG greens)
+          </label>
         </details>
 
         <details open>

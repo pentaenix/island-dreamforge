@@ -1,5 +1,8 @@
 /** Shared defaults for procedural terrain textures (step 2 + 3D viewport). */
 
+import { DEFAULT_DIORAMA_LIGHTING } from './dioramaLighting.js';
+import { MATERIAL_COLOR_DEFAULTS } from './materialColors.js';
+
 export const DEFAULT_TEXTURE_SETTINGS = {
   textureSize: 2048,
   pixelSize: 3,
@@ -31,7 +34,21 @@ export const DEFAULT_TEXTURE_SETTINGS = {
   preservePaintedEdits: true,
   /** 3D cone clumps on the island mesh (off by default; forest slider is texture-only). */
   showForestClumps: false,
+  /** 0 = PNG swatches only, 1 = full procedural palette from materialColors. */
+  materialColorStrength: 1,
+  materialColors: { ...MATERIAL_COLOR_DEFAULTS },
+  dioramaLighting: { ...DEFAULT_DIORAMA_LIGHTING },
+  /** When true, island 3D uses procedural colors only (fixes overly bright PNG greens). */
+  proceduralColorsOnly: true,
 };
+
+export function normalizeTextureSettings(raw = {}) {
+  const merged = { ...DEFAULT_TEXTURE_SETTINGS, ...raw };
+  merged.materialColors = { ...MATERIAL_COLOR_DEFAULTS, ...(raw.materialColors || {}) };
+  merged.dioramaLighting = { ...DEFAULT_DIORAMA_LIGHTING, ...(raw.dioramaLighting || {}) };
+  merged.materialColorStrength = Math.max(0, Math.min(1, Number(merged.materialColorStrength ?? 1)));
+  return merged;
+}
 
 export function settingsForViewDistance(settings, factor = 1) {
   const f = Math.max(1, Number(factor) || 1);

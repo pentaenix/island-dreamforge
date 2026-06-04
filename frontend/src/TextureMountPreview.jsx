@@ -2,6 +2,11 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
+  applyDioramaLighting,
+  createDioramaLighting,
+  dioramaLightingFromSettings,
+} from './dioramaLighting.js';
+import {
   DEMO_MOUNT_WORLD,
   buildDemoMountGeometry,
   buildSyntheticMountField,
@@ -60,7 +65,7 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
     renderer.setPixelRatio(Math.min(1.5, window.devicePixelRatio || 1));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.22;
+    renderer.toneMappingExposure = Number(dioramaLightingFromSettings(settings || {}).exposure ?? 1.12);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     el.appendChild(renderer.domElement);
@@ -73,18 +78,7 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
     controls.maxDistance = 520;
     applyView(controls, camera, activeViewRef.current);
 
-    scene.add(new THREE.HemisphereLight(0xd8f0ff, 0x4a5c42, 0.55));
-    const sun = new THREE.DirectionalLight(0xfff4e8, 1.15);
-    sun.position.set(180, 320, 120);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.camera.near = 40;
-    sun.shadow.camera.far = 700;
-    sun.shadow.camera.left = -220;
-    sun.shadow.camera.right = 220;
-    sun.shadow.camera.top = 220;
-    sun.shadow.camera.bottom = -220;
-    scene.add(sun);
+    const dioramaLights = createDioramaLighting(scene, dioramaLightingFromSettings(settings || {}));
 
     const water = new THREE.Mesh(
       new THREE.CircleGeometry(320, 72),
@@ -105,6 +99,7 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
 
     const applyTextures = (settingsNext) => {
       if (cancelled) return;
+      const L = dioramaLightingFromSettings(settingsNext || {});
       const painted = paintDemoMountTextures(settingsNext, mountField, TEX_SIZE, world);
       const nextAlbedo = imageDataToCanvasTexture(painted.color, { color: true });
       const nextNormal = imageDataToCanvasTexture(painted.normal, { color: false });
@@ -116,6 +111,8 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
         landMesh.material.normalMap = nextNormal;
         landMesh.material.transparent = true;
         landMesh.material.alphaTest = 0.35;
+        landMesh.material.normalScale.set(L.normalScale, L.normalScale);
+        landMesh.material.roughness = L.roughness;
         landMesh.material.needsUpdate = true;
       } else {
         const geometry = buildDemoMountGeometry(mountField);
@@ -124,9 +121,10 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
           new THREE.MeshStandardMaterial({
             map: nextAlbedo,
             normalMap: nextNormal,
-            normalScale: new THREE.Vector2(0.85, 0.85),
-            roughness: 0.88,
+            normalScale: new THREE.Vector2(L.normalScale, L.normalScale),
+            roughness: L.roughness,
             metalness: 0.02,
+            envMapIntensity: 0,
             transparent: true,
             alphaTest: 0.35,
             depthWrite: true,
@@ -141,6 +139,7 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
 
     applyTexturesRef.current = applyTextures;
     applyTextures(settings || {});
+    sceneRef.current = { controls, camera, renderer, scene, dioramaLights, landMesh: () => landMesh };
 
     if (landMesh) {
       const box = new THREE.Box3().setFromObject(landMesh);
@@ -171,8 +170,6 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
     };
     animate();
 
-    sceneRef.current = { controls, camera, renderer };
-
     return () => {
       cancelled = true;
       applyTexturesRef.current = null;
@@ -195,6 +192,16 @@ export default function TextureMountPreview({ settings, maxHeightM, seaLevelM })
   useEffect(() => {
     const timer = setTimeout(() => {
       applyTexturesRef.current?.(settings || {});
+      const sc = sceneRef.current;
+      if (sc?.dioramaLights) {
+        const L = dioramaLightingFromSettings(settings || {});
+        applyDioramaLighting(sc.dioramaLights, L, {
+          renderer: sc.renderer,
+          scene: sc.scene,
+          material: sc.landMesh?.()?.material,
+        });
+        if (sc.renderer) sc.renderer.toneMappingExposure = Number(L.exposure ?? 1.12);
+      }
     }, 48);
     return () => clearTimeout(timer);
   }, [settingsKey, settings]);

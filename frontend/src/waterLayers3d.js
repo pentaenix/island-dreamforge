@@ -86,6 +86,8 @@ export async function createWaterStack3d({
   group.name = 'island-ocean-stack';
   group.userData.isOcean = true;
   group.userData.discDiameterM = discDiameter;
+  group.userData.bandsTextureUrl = '';
+  group.userData.foamTextureUrl = '';
 
   const baseGeo = new THREE.CircleGeometry(discRadius, 128);
   const baseMat = new THREE.MeshBasicMaterial({
@@ -139,6 +141,7 @@ export async function createWaterStack3d({
       return waterColorUrl;
     });
 
+    group.userData.bandsTextureUrl = bandsUrl || waterColorUrl || '';
     const bandsTex = await loadTexture(bandsUrl || waterColorUrl);
     const bandsGeo = new THREE.PlaneGeometry(paddedW, paddedD, 1, 1);
     const bandsMat = layerMaterial({
@@ -176,6 +179,7 @@ export async function createWaterStack3d({
     return '';
   });
 
+  group.userData.foamTextureUrl = foamUrl || '';
   if (foamUrl) {
     const foamTex = await loadTexture(foamUrl);
     const foamGeo = new THREE.PlaneGeometry(discDiameter, discDiameter, 1, 1);

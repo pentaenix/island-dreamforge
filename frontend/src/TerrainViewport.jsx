@@ -12,6 +12,8 @@ import {
 } from './worldSettings.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { applyDioramaLighting, createDioramaLighting, dioramaLightingFromSettings } from './dioramaLighting.js';
+import { tintSampledMaterial } from './materialColors.js';
 import { createWaterStack3d, disposeWaterStack } from './waterLayers3d.js';
 import { isLandVertexM } from './waterMaskFromHeights.js';
 
@@ -292,44 +294,12 @@ function frameCinematicCamera(s, props = {}) {
   s.controls.update();
 }
 
-function setupIslandLighting(scene, cfg = {}) {
-  const L = { ...DEFAULT_VIEWPORT_CONFIG.lighting, ...(cfg.lighting || {}) };
-  const sunDir = getSunDirection(cfg);
-
-  scene.add(new THREE.AmbientLight(hexColor(L.ambientColor, 0x8eb8d8), Number(L.ambientIntensity ?? 0.11)));
-
-  const hemi = new THREE.HemisphereLight(
-    hexColor(L.hemisphereSky, 0xa8d8ff),
-    hexColor(L.hemisphereGround, 0x1a4a22),
-    Number(L.hemisphereIntensity ?? 0.48),
-  );
-  hemi.position.set(0, 400, 0);
-  scene.add(hemi);
-
-  const fill = new THREE.DirectionalLight(hexColor(L.fillColor, 0xc8e4ff), Number(L.fillIntensity ?? 0.1));
-  fill.position.set(-sunDir.x * 900, sunDir.y * 600, -sunDir.z * 900);
-  scene.add(fill);
-
-  const rim = new THREE.DirectionalLight(hexColor(L.rimColor, 0xffe8c8), Number(L.rimIntensity ?? 0.14));
-  rim.position.set(sunDir.x * 700, sunDir.y * 500, sunDir.z * 700);
-  scene.add(rim);
-
-  const sun = new THREE.DirectionalLight(hexColor(L.sunColor, 0xfff9ee), Number(L.sunIntensity ?? 3.85));
-  sun.position.copy(sunDir).multiplyScalar(2400);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.bias = -0.00022;
-  sun.shadow.normalBias = 0.025;
-  sun.shadow.radius = 3;
-  const cam = sun.shadow.camera;
-  cam.near = 120;
-  cam.far = 4200;
-  cam.left = cam.bottom = -1400;
-  cam.right = cam.top = 1400;
-  cam.updateProjectionMatrix();
-  scene.add(sun);
-
-  return { sun, hemi, fill, rim, sunDir };
+function setupIslandLighting(scene, textureSettings = {}, cfg = {}) {
+  const L = {
+    ...dioramaLightingFromSettings(textureSettings),
+    ...(cfg.lighting || {}),
+  };
+  return createDioramaLighting(scene, L);
 }
 
 const TerrainViewport = forwardRef(function TerrainViewport({
@@ -401,6 +371,14 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       const s = stateRef.current;
       if (s.heights && s.textureContext) paintAutoTexture(s, true);
     },
+    getWaterTextureUrls() {
+      const w = stateRef.current.water;
+      if (!w) return null;
+      return {
+        bands: w.userData?.bandsTextureUrl || '',
+        foam: w.userData?.foamTextureUrl || '',
+      };
+    },
     regenerateTrees() {
       renderVegetationClumps(stateRef.current);
     },
@@ -436,7 +414,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       if (fogCfg?.enabled !== false) {
         scene.fog = new THREE.FogExp2(hexColor(fogCfg.color || '#9ecae8'), Number(fogCfg.density ?? 0.000024));
       }
-      setupIslandLighting(scene, s.viewportConfig);
+      s.dioramaLights = setupIslandLighting(scene, propsRef.current.textureSettings || {}, s.viewportConfig);
 
       const camera = new THREE.PerspectiveCamera(50, mount.clientWidth / Math.max(1, mount.clientHeight), 0.5, 12000);
       camera.position.set(820, 280, 1180);
@@ -448,7 +426,9 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = Number(s.viewportConfig?.lighting?.exposure ?? 1.28);
+      renderer.toneMappingExposure = Number(
+        dioramaLightingFromSettings(propsRef.current.textureSettings).exposure ?? 1.12,
+      );
       mount.appendChild(renderer.domElement);
 
       const controls = new OrbitControls(camera, renderer.domElement);
@@ -550,10 +530,13 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const s = stateRef.current;
     if (s.heights && s.textureContext) paintAutoTexture(s, false);
     renderVegetationClumps(s);
-    if (s.material?.normalScale) {
-      const st = propsRef.current.textureSettings || {};
-      s.material.normalScale.set(Number(st.normalStrength ?? 0.72), Number(st.normalStrength ?? 0.72));
-      s.material.roughness = 0.86;
+    const st = propsRef.current.textureSettings || {};
+    if (s.dioramaLights) {
+      applyDioramaLighting(s.dioramaLights, dioramaLightingFromSettings(st), {
+        renderer: s.renderer,
+        scene: s.scene,
+        material: s.material,
+      });
     }
   }, [textureSettings]);
   useEffect(() => {
@@ -658,15 +641,15 @@ const TerrainViewport = forwardRef(function TerrainViewport({
 
     const geometry = makeGeometry(heights, rows, cols, Number(maxHeightM || 500), propsRef.current.worldSettings || {}, islandMask, Number(propsRef.current.seaLevelM || 0));
     const st = propsRef.current.textureSettings || {};
-    const envIntensity = Number(s.viewportConfig?.lighting?.envMapIntensity ?? 1.05);
+    const lightCfg = dioramaLightingFromSettings(st);
     const material = new THREE.MeshStandardMaterial({
       map: texture,
       normalMap: normalTexture,
-      normalScale: new THREE.Vector2(Number(st.normalStrength ?? 0.82), Number(st.normalStrength ?? 0.82)),
-      roughness: 0.84,
+      normalScale: new THREE.Vector2(lightCfg.normalScale, lightCfg.normalScale),
+      roughness: lightCfg.roughness,
       metalness: 0.01,
       envMap: s.skybox || null,
-      envMapIntensity: envIntensity,
+      envMapIntensity: lightCfg.envMapIntensity,
       transparent: true,
       alphaTest: 0.04,
       depthWrite: true,
@@ -908,12 +891,16 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const tileU = (wx, pw) => ((wx % pw) + pw) % pw / Math.max(1, pw);
     const tileV = (wz, ph) => ((wz % ph) + ph) % ph / Math.max(1, ph);
 
-    const sampleMaterial = (id, tu, tv) => {
-      const key = id === 'trees' ? (pat.trees ? 'trees' : 'grass') : id;
-      const entry = pat[key] || (id === 'wet_sand' ? (pat.wet_sand || pat.sand) : null) || pat.sand;
-      if (!entry) return null;
-      return samplePattern(entry, tu, tv);
-    };
+    const useProceduralOnly = settings.proceduralColorsOnly === true;
+    const sampleMaterial = useProceduralOnly
+      ? null
+      : (id, tu, tv) => {
+        const key = id === 'trees' ? (pat.trees ? 'trees' : 'grass') : id;
+        const entry = pat[key] || (id === 'wet_sand' ? (pat.wet_sand || pat.sand) : null) || pat.sand;
+        if (!entry) return null;
+        const rgb = samplePattern(entry, tu, tv);
+        return tintSampledMaterial(rgb, id, settings);
+      };
 
     const slopes = buildSlopeFieldFromHeights(s.heights, s.rows, s.cols, {
       widthM: width,
