@@ -6,6 +6,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.bathymetry import generate_bathymetry
 from app.island_maps import (
     MATERIAL_WATER,
     compute_distance_to_land,
@@ -13,6 +14,7 @@ from app.island_maps import (
     derive_island_mask,
     generate_material_maps,
     generate_ocean_bathymetry,
+    refine_island_mask_for_ocean,
 )
 
 
@@ -86,6 +88,37 @@ class IslandMapTests(unittest.TestCase):
         self.assertGreater(near, 0.0)
         self.assertGreater(far, near)
         self.assertLess(float(maps["seafloor_height"][0, 0]), 0.0)
+
+    def test_refine_mask_opens_enclosed_lagoon(self):
+        height = np.zeros((11, 11), dtype=np.float32)
+        height[2:9, 2:4] = 20.0
+        height[2:9, 7:9] = 20.0
+        height[2:4, 2:9] = 20.0
+        raw = derive_island_mask(height, {"seaLevelM": 0, "landThresholdM": 0.25, "maskClosePasses": 1})
+        refined = refine_island_mask_for_ocean(height, raw, {"seaLevelM": 0, "landThresholdM": 0.25})
+        self.assertFalse(refined[5, 5], "crescent bay center should not be land")
+        bathy = generate_bathymetry(
+            height,
+            refined,
+            {"seaLevelM": 0, "landThresholdM": 0.25, "widthM": 110, "depthM": 110, "oceanRadiusM": 80},
+        )
+        self.assertTrue(bathy["water_mask"][5, 5], "lagoon center uses height-based wet mask")
+        self.assertGreater(int(np.sum(bathy["water_color_rgb"][5, 5])), 0)
+
+    def test_bathymetry_ignores_morph_land_for_water_mask(self):
+        height = np.zeros((9, 9), dtype=np.float32)
+        height[2:7, 2:7] = 30.0
+        height[4, 4] = 0.0
+        morph_land = np.zeros((9, 9), dtype=bool)
+        morph_land[2:7, 2:7] = True
+        morph_land[4, 4] = True
+        bathy = generate_bathymetry(
+            height,
+            morph_land,
+            {"seaLevelM": 0, "landThresholdM": 0.25, "widthM": 90, "depthM": 90, "oceanRadiusM": 60},
+        )
+        self.assertFalse(morph_land[4, 4] and not bathy["water_mask"][4, 4])
+        self.assertTrue(bathy["water_mask"][4, 4])
 
     def test_ocean_disc_respects_configured_radius(self):
         height = np.zeros((5, 5), dtype=np.float32)

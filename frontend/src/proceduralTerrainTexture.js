@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { settingsForViewDistance } from './textureSettings.js';
+import { textureNormsFromSettings } from './textureNorms.js';
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function smoothstep(a, b, x) {
@@ -135,13 +136,21 @@ export function paintProceduralTerrainTexture(opts) {
     rows,
     cols,
     settings = {},
-    seaNorm = 0.06,
-    sandNorm = 0.14,
+    seaNorm: seaNormIn,
+    sandNorm: sandNormIn,
+    wetNorm: wetNormIn,
     worldW = 1480,
     worldD = 1086,
     landAt = null,
     sampleMaterial = null,
   } = opts;
+  const norms = textureNormsFromSettings(settings, {
+    maxHeightM: opts.maxHeightM,
+    seaLevelM: opts.seaLevelM,
+  });
+  const seaNorm = seaNormIn ?? norms.seaNorm;
+  const sandNorm = sandNormIn ?? norms.sandNorm;
+  const wetNorm = wetNormIn ?? norms.wetNorm;
 
   const pixel = Math.max(1, Number(settings.pixelSize || 3));
   const coarseBlocks = 1 + Math.floor(Number(settings.distantPixelBoost ?? 0) * 2.2);
@@ -160,8 +169,6 @@ export function paintProceduralTerrainTexture(opts) {
   const macroTiling = Math.max(24, Number(settings.macroTilingM ?? 110));
   const macroV = Number(settings.macroVariation ?? 0.48);
   const aerial = Number(settings.aerialSoftness ?? 0.32);
-  const wetNorm = Number(settings.wetSandWidthM ?? 5) / 500;
-
   const img = new ImageData(size, size);
   const normalImg = new ImageData(size, size);
   const data = img.data;
@@ -244,6 +251,27 @@ export function paintProceduralTerrainTexture(opts) {
         rockT * 0.6 + gravelT * 0.15,
       );
 
+      const shoreBand = h > seaNorm - 0.01 && h < seaNorm + sandNorm + wetNorm * 1.6;
+      const shoreOpaque = land || shoreBand;
+      if (shoreOpaque && !land) {
+        color = mixRgb(wetRgb, sandRgb, clamp(shore * 1.15, 0, 1));
+      }
+
+      const foliageNorm = Number(settings.foliageNormalStrength ?? 0.72);
+      if (land && highForest > 0.06 && rockT < 0.5) {
+        const tuftCell = fbm(Math.floor(x / treePixel), Math.floor(y / treePixel), 77);
+        const crown = smoothstep(0.38, 0.68, tuftCell) * forestBlock * highForest * (1 - rockT);
+        color = mixRgb(color, FALLBACK.treesDark, crown * 0.4);
+        color = mixRgb(color, [color[0] + 18, color[1] + 26, color[2] + 6], crown * 0.2 * (0.5 + treeNoise));
+        const tgx = (fbm((x + 1) / treePixel, y / treePixel, 88) - fbm((x - 1) / treePixel, y / treePixel, 88))
+          * foliageNorm * 58 * crown;
+        const tgz = (fbm(x / treePixel, (y + 1) / treePixel, 88) - fbm(x / treePixel, (y - 1) / treePixel, 88))
+          * foliageNorm * 58 * crown;
+        normalRgb[0] = clamp(normalRgb[0] + tgx, 0, 255);
+        normalRgb[1] = clamp(normalRgb[1] + 32 * crown + 12 * foliageNorm * forestBlock, 0, 255);
+        normalRgb[2] = clamp(normalRgb[2] + tgz, 0, 255);
+      }
+
       const artistNoise = (fine - 0.5) * 14 * variation;
       const p = (y * size + x) * 4;
       const fuzzMask = 1 - fuzzy * 0.1 + fuzzy * (0.68 + coarse * 0.32);
@@ -256,12 +284,12 @@ export function paintProceduralTerrainTexture(opts) {
       data[p] = clamp(Math.round(contrasted[0] * fuzzMask + artistNoise), 0, 255);
       data[p + 1] = clamp(Math.round(contrasted[1] * fuzzMask + artistNoise), 0, 255);
       data[p + 2] = clamp(Math.round(contrasted[2] * fuzzMask + artistNoise * 0.45), 0, 255);
-      data[p + 3] = land ? 255 : 0;
+      data[p + 3] = shoreOpaque ? 255 : 0;
       const bump = (fine - 0.5) * Number(settings.normalStrength ?? 0.72) * 36;
       nd[p] = clamp(Math.round(normalRgb[0] + bump * 0.12), 0, 255);
       nd[p + 1] = clamp(Math.round(normalRgb[1] + bump * 0.08), 0, 255);
       nd[p + 2] = clamp(Math.round(normalRgb[2]), 0, 255);
-      nd[p + 3] = land ? 255 : 0;
+      nd[p + 3] = shoreOpaque ? 255 : 0;
     }
   }
   return { color: img, normal: normalImg };
@@ -315,7 +343,8 @@ export function buildDemoMountGeometry(mount, world = DEMO_MOUNT_WORLD) {
 }
 
 /** Procedural albedo + normal for the demo mount mesh. */
-export function paintDemoMountTextures(settings, mount, texSize = 640) {
+export function paintDemoMountTextures(settings, mount, texSize = 640, world = {}) {
+  const norms = textureNormsFromSettings(settings, world);
   return paintProceduralTerrainTexture({
     size: texSize,
     heights: mount.heights,
@@ -323,8 +352,11 @@ export function paintDemoMountTextures(settings, mount, texSize = 640) {
     rows: mount.rows,
     cols: mount.cols,
     settings,
-    seaNorm: mount.seaNorm,
-    sandNorm: mount.sandNorm,
+    seaNorm: norms.seaNorm,
+    sandNorm: norms.sandNorm,
+    wetNorm: norms.wetNorm,
+    maxHeightM: norms.maxHeightM,
+    seaLevelM: norms.seaLevelM,
   });
 }
 
@@ -343,28 +375,27 @@ export function imageDataToCanvasTexture(imageData, { color = true } = {}) {
 /**
  * Shape-agnostic texture swatch (demo mount) with near / mid / far readouts.
  */
-export function buildTextureSwatchPreview(settings = {}) {
+export function buildTextureSwatchPreview(settings = {}, world = {}) {
   const mount = buildSyntheticMountField(96, 96);
-  const near = paintProceduralTerrainTexture({
-    size: 560,
+  const norms = textureNormsFromSettings(settings, world);
+  const paintOpts = {
     ...mount,
-    settings,
-    seaNorm: mount.seaNorm,
-    sandNorm: mount.sandNorm,
-  });
+    seaNorm: norms.seaNorm,
+    sandNorm: norms.sandNorm,
+    wetNorm: norms.wetNorm,
+    maxHeightM: norms.maxHeightM,
+    seaLevelM: norms.seaLevelM,
+  };
+  const near = paintProceduralTerrainTexture({ size: 560, ...paintOpts, settings });
   const mid = paintProceduralTerrainTexture({
     size: 280,
-    ...mount,
+    ...paintOpts,
     settings: settingsForViewDistance(settings, 1.85),
-    seaNorm: mount.seaNorm,
-    sandNorm: mount.sandNorm,
   });
   const far = paintProceduralTerrainTexture({
     size: 140,
-    ...mount,
+    ...paintOpts,
     settings: settingsForViewDistance(settings, 3.2),
-    seaNorm: mount.seaNorm,
-    sandNorm: mount.sandNorm,
   });
 
   return {

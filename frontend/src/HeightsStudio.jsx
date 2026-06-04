@@ -8,6 +8,7 @@ import {
   Swatch,
   WorkflowSteps,
 } from './studioUi.jsx';
+import FlatSectionsPanel from './FlatSectionsPanel.jsx';
 import WorldScalePanel from './WorldScalePanel.jsx';
 
 // ── Shared tune controls ─────────────────────────────────────────────────────
@@ -231,8 +232,17 @@ export default function HeightsStudio(props) {
     waterOnlyStarter, islandColorLadder,
     onBaseMap, onAddHeightPoint, onUpdateSample,
     onAnalyzeColors, onPreviewCleanMap, onGenerateHeightmap,
+    flatSectionLayers = [],
+    applyFlatSections = true,
+    onApplyFlatSectionsChange,
+    onAddFlatSection,
+    onUpdateFlatSection,
+    onDeleteFlatSection,
+    onClearFlatSection,
+    onFlatSectionFile,
   } = props;
 
+  const [showFlatMaskOnMap, setShowFlatMaskOnMap] = useState(true);
   const [profileAxis, setProfileAxis] = useState('width');
   const [helpOpen, setHelpOpen] = useState(false);
   const [samplesCollapsed, setSamplesCollapsed] = useState(false);
@@ -267,7 +277,7 @@ export default function HeightsStudio(props) {
           <p className="eyebrow">Step 1 · Heights</p>
           <h2 className="studio-page-heading">Tuning desk</h2>
           <p className="studio-page-lede compact">
-            Use the main viewport to switch between your color map and the baked height map. Opening the height view generates it automatically when needed.
+            Color heights define terrain, then optional flat-section masks level mesas and pads before the height map is baked.
           </p>
         </div>
         <WorkflowSteps steps={workflowSteps} />
@@ -292,6 +302,8 @@ export default function HeightsStudio(props) {
           <li><strong>Green dashed (profile)</strong> — cross-section of the last baked height map.</li>
           <li><strong>Handles</strong> — drag a colored dot on the left Y-axis to change that color's target height. Release to apply.</li>
           <li><strong>⛶ Fine-tune button</strong> — opens a full-screen view with real-time sliders and a large chart.</li>
+          <li><strong>Flat sections</strong> — mask overlays on the map at 80% opacity; flatten strength softens terrain without a hard plane.</li>
+          <li><strong>Smooth %</strong> — per color next to height; lowers slope blending for crisp mesas or raises it for soft ramps.</li>
         </ul>
       </HelpModal>
 
@@ -329,11 +341,26 @@ export default function HeightsStudio(props) {
             picked={picked}
             onPick={(hex) => setPicked(hex)}
             onEnsureHeightmap={onEnsureHeightmap}
+            flatSectionLayers={flatSectionLayers}
+            showFlatMaskOnMap={showFlatMaskOnMap}
           />
 
           <div className="heights-profile-row">
             <HeightProfileChart large {...profileProps} />
           </div>
+
+          <FlatSectionsPanel
+            layers={flatSectionLayers}
+            applyFlatSections={applyFlatSections}
+            showFlatMaskOnMap={showFlatMaskOnMap}
+            onApplyFlatSectionsChange={onApplyFlatSectionsChange}
+            onShowFlatMaskOnMapChange={setShowFlatMaskOnMap}
+            onAdd={onAddFlatSection}
+            onUpdate={onUpdateFlatSection}
+            onDelete={onDeleteFlatSection}
+            onClear={onClearFlatSection}
+            onSetFile={onFlatSectionFile}
+          />
 
           <div className="heights-samples-dock">
             <button
@@ -367,14 +394,35 @@ export default function HeightsStudio(props) {
                   <label>m <input type="number" value={newHeight} onChange={(e) => setNewHeight(e.target.value)} /></label>
                   <button type="button" className="primary" onClick={onAddHeightPoint}>Add / update</button>
                 </div>
-                <div className="sample-list simple">
+                <div className="sample-list heights-samples">
+                  <div className="sample-list-head small muted">
+                    <span>Color</span>
+                    <span>Height</span>
+                    <span title="How much global slope smoothing affects this color (0 = crisp steps, 1 = full blend)">Smooth</span>
+                    <span />
+                  </div>
                   {samples.map((s, i) => (
-                    <div className="sample-simple" key={`${s.hex}_${i}`}>
+                    <div className="sample-row" key={`${s.hex}_${i}`}>
                       <input className="sample-color" type="color" value={s.hex} onChange={(e) => onUpdateSample(i, { hex: e.target.value })} />
                       <code>{s.hex}</code>
-                      <label><input type="number" value={s.height} onChange={(e) => onUpdateSample(i, { height: Number(e.target.value) })} /></label>
-                      <span className="muted">m</span>
-                      <button type="button" onClick={() => setSamples((prev) => prev.filter((_, idx) => idx !== i))}>×</button>
+                      <label className="sample-height">
+                        <input type="number" value={s.height} onChange={(e) => onUpdateSample(i, { height: Number(e.target.value) })} />
+                        <span className="muted">m</span>
+                      </label>
+                      <label className="sample-smooth" title="Per-color slope smoothing">
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={5}
+                          value={Math.round((s.smoothness == null ? 100 : Number(s.smoothness) * 100))}
+                          onChange={(e) => onUpdateSample(i, { smoothness: Number(e.target.value) / 100 })}
+                        />
+                        <span className="sample-smooth-val">
+                          {s.smoothness == null ? '100%' : `${Math.round(Number(s.smoothness) * 100)}%`}
+                        </span>
+                      </label>
+                      <button type="button" className="sample-del" onClick={() => setSamples((prev) => prev.filter((_, idx) => idx !== i))}>×</button>
                     </div>
                   ))}
                 </div>

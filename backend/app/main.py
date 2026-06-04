@@ -22,7 +22,13 @@ from .image_utils import (
 from .island_export import build_game_island_export, build_web_island_export, derived_maps_payload
 from .mesh_export import export_mesh_bytes, height_to_mesh
 from .layers import analyze_overlay_layer
-from .terrain import bake_water_layer, generate_heightmap_from_colors, parse_samples, preprocess_map_for_height, quantize_dominant_colors
+from .terrain import (
+    bake_water_layer,
+    generate_heightmap_from_colors,
+    parse_samples,
+    preprocess_map_for_height,
+    quantize_dominant_colors,
+)
 
 app = FastAPI(title="Island Dreamforge API", version="1.0.0")
 
@@ -92,13 +98,32 @@ async def create_heightmap(
     samples: str = Form(...),
     options: str = Form("{}"),
     response_format: str = Form("json"),
+    flat_layers: List[UploadFile] = File(default=[]),
+    flat_layer_options: str = Form("[]"),
 ) -> Response | Dict[str, Any]:
     opts = _json_field(options, {})
     sample_list = parse_samples(_json_field(samples, []))
     max_height_m = float(opts.get("maxHeightM", 500.0))
+    apply_flat = opts.get("applyFlatSections", True) is not False
     try:
         image = read_upload_image(await map_image.read(), "RGBA")
-        height = generate_heightmap_from_colors(image, sample_list, max_height_m, opts)
+        flat_masks: List[np.ndarray] = []
+        if apply_flat and flat_layers:
+            layer_opts = _json_field(flat_layer_options, [])
+            for i, upload in enumerate(flat_layers):
+                per_opts = layer_opts[i] if i < len(layer_opts) else {}
+                threshold = int(per_opts.get("maskThreshold", 8) or 8)
+                layer_img = read_upload_image(await upload.read(), "RGBA")
+                layer_img = resize_to_match(layer_img, (image.height, image.width), Image.Resampling.NEAREST)
+                flat_masks.append(mask_from_colored_layer(layer_img, threshold=threshold))
+        height = generate_heightmap_from_colors(
+            image,
+            sample_list,
+            max_height_m,
+            opts,
+            flat_masks=flat_masks if flat_masks else None,
+            flat_layer_options=_json_field(flat_layer_options, []) if flat_masks else None,
+        )
         height16 = array_to_16bit_png(height, max_height_m)
         preview = array_to_preview_png(height, max_height_m)
         recipe = {

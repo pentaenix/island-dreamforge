@@ -4,15 +4,9 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-# Tropical aerial / Pokémon-style stepped ramp (sand → pale aqua → turquoise → reef → deep)
-TROPICAL_RAMP = (
-    (0.00, (241, 229, 178)),  # wet sand / pale shore
-    (0.12, (189, 244, 231)),  # pale aqua
-    (0.28, (83, 214, 210)),   # turquoise lagoon
-    (0.48, (31, 182, 201)),   # cyan-blue reef edge
-    (0.72, (8, 127, 176)),    # open ocean
-    (1.00, (6, 43, 99)),      # deep ocean
-)
+from .distance_field import euclidean_distance_to_land
+from .water_band_steps import band_edges_from_options, distance_to_bathy01_bands, ocean_disc_rim_fade
+from .water_palette import color_ramp
 
 # Default band edges in meters from shore (tight around island)
 DEFAULT_BAND_EDGES_M = (0.0, 10.0, 24.0, 48.0, 78.0, 120.0, 185.0)
@@ -21,6 +15,83 @@ DEFAULT_BAND_EDGES_M = (0.0, 10.0, 24.0, 48.0, 78.0, 120.0, 185.0)
 def smoothstep(a: float, b: float, x: np.ndarray) -> np.ndarray:
     t = np.clip((x - a) / max(1e-6, b - a), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
+
+
+def bands_plane_dims_m(options: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    """Island footprint vs band-reach plane (m) — reach extends canvas, not UV scale."""
+    width_m = float(options.get("widthM", options.get("worldWidthM", 9000)) or 9000)
+    depth_m = float(options.get("depthM", options.get("worldDepthM", width_m)) or width_m)
+    radius = float(options.get("oceanRadiusM", 650) or 650)
+    explicit_w = float(options.get("bandsPlaneWidthM", 0) or 0)
+    explicit_d = float(options.get("bandsPlaneDepthM", 0) or 0)
+    plane_w = explicit_w if explicit_w > width_m else max(width_m, radius * 2.0)
+    plane_d = explicit_d if explicit_d > depth_m else max(depth_m, radius * 2.0)
+    return width_m, depth_m, plane_w, plane_d
+
+
+def _paste_center_into_bands_plane(
+    source: np.ndarray,
+    width_m: float,
+    depth_m: float,
+    plane_w: float,
+    plane_d: float,
+    *,
+    fill: float = 0.0,
+) -> np.ndarray:
+    """Paste island grid into center of larger canvas at original pixel size (no scale)."""
+    rows, cols = source.shape
+    out_cols = max(cols, int(round((cols - 1) * (plane_w / width_m))) + 1)
+    out_rows = max(rows, int(round((rows - 1) * (plane_d / depth_m))) + 1)
+    pad_c = (out_cols - cols) // 2
+    pad_r = (out_rows - rows) // 2
+    if source.dtype == bool:
+        out = np.zeros((out_rows, out_cols), dtype=bool)
+    else:
+        out = np.full((out_rows, out_cols), fill, dtype=source.dtype)
+    out[pad_r : pad_r + rows, pad_c : pad_c + cols] = source
+    return out
+
+
+def expand_grid_for_bands_reach(
+    height: np.ndarray,
+    island_mask: np.ndarray,
+    options: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    width_m, depth_m, plane_w, plane_d = bands_plane_dims_m(options)
+    if plane_w <= width_m + 0.5 and plane_d <= depth_m + 0.5:
+        return height, island_mask, options
+    h_new = _paste_center_into_bands_plane(height.astype(np.float32), width_m, depth_m, plane_w, plane_d, fill=0.0)
+    m_new = _paste_center_into_bands_plane(island_mask.astype(bool), width_m, depth_m, plane_w, plane_d, fill=False)
+    opts_out = dict(options)
+    opts_out["_bandsFootprintWidthM"] = width_m
+    opts_out["_bandsFootprintDepthM"] = depth_m
+    opts_out["widthM"] = plane_w
+    opts_out["depthM"] = plane_d
+    return h_new, m_new, opts_out
+
+
+def crop_bathymetry_to_footprint(
+    bathy: Dict[str, np.ndarray],
+    footprint_rows: int,
+    footprint_cols: int,
+) -> Dict[str, np.ndarray]:
+    ref = bathy.get("water_color_rgb")
+    if ref is None:
+        return bathy
+    full_rows, full_cols = ref.shape[:2]
+    if full_rows == footprint_rows and full_cols == footprint_cols:
+        return bathy
+    pad_r = max(0, (full_rows - footprint_rows) // 2)
+    pad_c = max(0, (full_cols - footprint_cols) // 2)
+    y1 = pad_r + footprint_rows
+    x1 = pad_c + footprint_cols
+    out: Dict[str, np.ndarray] = {}
+    for key, val in bathy.items():
+        if isinstance(val, np.ndarray) and val.ndim >= 2 and val.shape[0] == full_rows and val.shape[1] == full_cols:
+            out[key] = val[pad_r:y1, pad_c:x1] if val.ndim == 2 else val[pad_r:y1, pad_c:x1, ...]
+        else:
+            out[key] = val
+    return out
 
 
 def world_coordinates(rows: int, cols: int, options: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -36,42 +107,6 @@ def world_coordinates(rows: int, cols: int, options: Dict[str, Any]) -> Tuple[np
     xx, zz = np.meshgrid(xs, zs)
     px = ((width_m / max(1, cols - 1)) + (depth_m / max(1, rows - 1))) * 0.5
     return xx, zz, max(1e-6, float(px))
-
-
-def chamfer_distance_to_land(island_mask: np.ndarray, pixel_size_m: float, max_distance_m: float) -> np.ndarray:
-    land = np.asarray(island_mask, dtype=bool)
-    rows, cols = land.shape
-    ortho = float(max(1e-6, pixel_size_m))
-    diag = ortho * 1.41421356
-    large = float(max_distance_m) + diag * (rows + cols + 2)
-    dist = np.where(land, 0.0, large).astype(np.float32)
-
-    for y in range(rows):
-        for x in range(cols):
-            best = dist[y, x]
-            if x > 0:
-                best = min(best, float(dist[y, x - 1]) + ortho)
-            if y > 0:
-                best = min(best, float(dist[y - 1, x]) + ortho)
-                if x > 0:
-                    best = min(best, float(dist[y - 1, x - 1]) + diag)
-                if x + 1 < cols:
-                    best = min(best, float(dist[y - 1, x + 1]) + diag)
-            dist[y, x] = best
-
-    for y in range(rows - 1, -1, -1):
-        for x in range(cols - 1, -1, -1):
-            best = dist[y, x]
-            if x + 1 < cols:
-                best = min(best, float(dist[y, x + 1]) + ortho)
-            if y + 1 < rows:
-                best = min(best, float(dist[y + 1, x]) + ortho)
-                if x > 0:
-                    best = min(best, float(dist[y + 1, x - 1]) + diag)
-                if x + 1 < cols:
-                    best = min(best, float(dist[y + 1, x + 1]) + diag)
-            dist[y, x] = best
-    return np.minimum(dist, max_distance_m).astype(np.float32)
 
 
 def box_blur(values: np.ndarray, radius: int) -> np.ndarray:
@@ -110,21 +145,6 @@ def value_noise(shape: Tuple[int, int], scale_px: float, seed: int) -> np.ndarra
     return ((a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty) * 2.0 - 1.0
 
 
-def _band_edges_from_options(opts: Dict[str, Any]) -> List[float]:
-    shallow = float(opts.get("shallowShelfM", opts.get("shoreShelfWidthM", 24.0)) or 24.0)
-    mid = float(opts.get("midShelfM", opts.get("midWaterDistanceM", 70.0)) or 70.0)
-    deep = float(opts.get("deepStartM", opts.get("deepWaterDistanceM", 150.0)) or 150.0)
-    edges = [0.0, max(4.0, shallow * 0.35), shallow, mid, deep, deep + 80.0]
-    custom = opts.get("waterBandEdgesM")
-    if isinstance(custom, (list, tuple)) and len(custom) >= 2:
-        edges = [float(v) for v in custom]
-    edges = sorted(set(max(0.0, e) for e in edges))
-    for i in range(1, len(edges)):
-        if edges[i] <= edges[i - 1]:
-            edges[i] = edges[i - 1] + 1.0
-    return edges
-
-
 def distance_to_bathymetry01(
     shore_distance_m: np.ndarray,
     water_mask: np.ndarray,
@@ -145,16 +165,14 @@ def distance_to_bathymetry01(
     return np.clip(bathy, 0.0, 1.0).astype(np.float32)
 
 
-def discrete_band_colors(values: np.ndarray, ramp=TROPICAL_RAMP) -> np.ndarray:
-    """Hard-step colors per bathymetry band (no smooth blending between stops)."""
-    stops = [np.asarray(rgb, dtype=np.float32) for _, rgb in ramp]
-    n = len(stops)
-    idx = np.clip(np.rint(np.clip(values.astype(np.float32), 0.0, 1.0) * (n - 1)), 0, n - 1).astype(np.int32)
-    return np.asarray(stops, dtype=np.uint8)[idx]
-
-
-def color_ramp(values: np.ndarray, ramp=TROPICAL_RAMP) -> np.ndarray:
-    return discrete_band_colors(values, ramp)
+def _water_band_smoothness(opts: Dict[str, Any]) -> float:
+    return float(
+        opts.get(
+            "waterBandSmoothness",
+            opts.get("waterColorSmoothness", 0.35),
+        )
+        or 0.35
+    )
 
 
 def generate_bathymetry(height: np.ndarray, island_mask: np.ndarray, options: Dict[str, Any] | None = None) -> Dict[str, np.ndarray]:
@@ -173,37 +191,41 @@ def generate_bathymetry(height: np.ndarray, island_mask: np.ndarray, options: Di
     foam_width = float(opts.get("foamWidthM", 10.0) or 10.0)
     foam_strength = float(opts.get("foamStrength", 0.22) or 0.22)
     seed = int(opts.get("seed", opts.get("materialSeed", 1337)) or 1337)
-    band_edges = _band_edges_from_options(opts)
+    band_edges = band_edges_from_options(opts)
+    rim_fade_m = float(opts.get("oceanFoamRimFadeM", 48.0) or 48.0)
 
     radial = np.sqrt(xx * xx + zz * zz).astype(np.float32)
     ocean_disc = radial <= radius
-    water_mask = ocean_disc & ~land
+    threshold = float(opts.get("landThresholdM", sea + 0.25) or (sea + 0.25))
+    # Height-based wet/dry — avoids inverted ocean when morph mask fills lagoons.
+    dry_land = h > threshold
+    water_mask = ocean_disc & (~dry_land)
     max_dist = max(radius, band_edges[-1] + 40.0, pixel_m * 4.0)
-    shore_distance = chamfer_distance_to_land(land, pixel_m, max_dist)
+    shore_distance = euclidean_distance_to_land(dry_land, pixel_m, max_dist)
 
     gy, gx = np.gradient(h, pixel_m, pixel_m)
     slope01 = np.clip(np.sqrt(gx * gx + gy * gy), 0.0, 1.0)
-    sandness = ((h <= sea + 28.0) & (slope01 < 0.28) & land).astype(np.float32)
+    sandness = ((h <= sea + 28.0) & (slope01 < 0.28) & dry_land).astype(np.float32)
     coast_sand = box_blur(sandness, max(1, int(band_edges[2] / pixel_m)))
-    coast_slope = box_blur((slope01 * land).astype(np.float32), max(1, int(band_edges[2] / pixel_m)))
+    coast_slope = box_blur((slope01 * dry_land).astype(np.float32), max(1, int(band_edges[2] / pixel_m)))
     coast_noise = box_blur(value_noise((rows, cols), max(8, min(rows, cols) * 0.12), seed + 11), 1)
 
     shelf_scale = 1.0 + 0.35 * coast_sand - 0.45 * coast_slope + coastal_variation * coast_noise * 0.25
     shelf_scale = np.clip(shelf_scale, 0.55, 1.35)
     effective_m = shore_distance / np.maximum(0.35, shelf_scale)
 
-    bathy = distance_to_bathymetry01(effective_m, water_mask, band_edges)
+    band_smooth = _water_band_smoothness(opts)
+    bathy = distance_to_bathy01_bands(effective_m, water_mask, band_edges)
 
     if smooth_px > 0:
         soft = box_blur(bathy, smooth_px)
-        bathy = np.where(water_mask, soft, 0.0)
-        bathy = distance_to_bathymetry01(effective_m, water_mask, band_edges)
+        bathy = np.where(water_mask, soft, 0.0).astype(np.float32)
 
     if reef_strength > 0:
         reef = box_blur(value_noise((rows, cols), max(6, min(rows, cols) * 0.06), seed + 29), 1)
         shallow_w = 1.0 - smoothstep(band_edges[2], band_edges[-2], effective_m)
         perturbed = effective_m + reef * reef_strength * shallow_w * band_edges[2] * 0.35
-        bathy = distance_to_bathymetry01(perturbed, water_mask, band_edges)
+        bathy = distance_to_bathy01_bands(perturbed, water_mask, band_edges)
 
     seafloor = sea - bathy * max_depth
     near = 1.0 - smoothstep(0.0, band_edges[2], effective_m)
@@ -213,14 +235,15 @@ def generate_bathymetry(height: np.ndarray, island_mask: np.ndarray, options: Di
     foam_inner = max(pixel_m * 0.35, foam_width * 0.08)
     foam_outer = max(foam_width, pixel_m * 1.25)
     foam = (1.0 - smoothstep(foam_inner, foam_outer, shore_distance)) * water_mask
+    foam *= ocean_disc_rim_fade(radial, radius, rim_fade_m)
     foam = np.clip(foam * (0.7 + 0.3 * foam_noise) * foam_strength, 0.0, 1.0).astype(np.float32)
 
     wave = ((value_noise((rows, cols), max(5, min(rows, cols) * 0.04), seed + 101) + 1.0) * 0.5).astype(np.float32)
-    water_color = color_ramp(bathy)
+    water_color = color_ramp(bathy, smoothness=band_smooth)
     water_color[~water_mask] = 0
 
     return _package_bathymetry_arrays(
-        bathy, seafloor, water_mask, ocean_disc, shore_distance, foam, wave, water_color, band_edges, land, max_depth
+        bathy, seafloor, water_mask, ocean_disc, shore_distance, foam, wave, water_color, band_edges, dry_land, max_depth
     )
 
 
@@ -264,14 +287,23 @@ def generate_water_disc_preview(options: Dict[str, Any] | None = None) -> Dict[s
     sphere_r = min(max(8.0, sphere_r), max(8.0, ocean_r - 20.0))
     size = int(opts.get("waterPreviewSizePx", 512) or 512)
     size = int(np.clip(size, 128, 1024))
-    pixel_m = (ocean_r * 2.0) / max(1, size - 1)
+    width_m = float(opts.get("widthM", 1480.0) or 1480.0)
+    depth_m = float(opts.get("depthM", 1086.0) or 1086.0)
+    footprint_r = float(np.hypot(width_m * 0.5, depth_m * 0.5))
+    view_span_m = float(opts.get("waterDiscPreviewSpanM", 0.0) or 0.0)
+    if view_span_m <= 0.0:
+        disc_d = ocean_r * 2.0
+        view_span_m = min(48000.0, max(disc_d * 1.24, 520.0))
+    half_span = view_span_m * 0.5
+    pixel_m = view_span_m / max(1, size - 1)
     smooth_px = min(int(opts.get("bathymetrySmoothPx", 1) or 1), 2)
     reef_strength = float(opts.get("reefNoiseStrength", 0.05) or 0.05)
     seed = int(opts.get("seed", opts.get("materialSeed", 1337)) or 1337)
-    band_edges = _band_edges_from_options(opts)
+    band_edges = band_edges_from_options(opts)
+    rim_fade_m = float(opts.get("oceanFoamRimFadeM", 48.0) or 48.0)
 
-    xs = np.linspace(-ocean_r, ocean_r, size, dtype=np.float32)
-    zs = np.linspace(-ocean_r, ocean_r, size, dtype=np.float32)
+    xs = np.linspace(-half_span, half_span, size, dtype=np.float32)
+    zs = np.linspace(-half_span, half_span, size, dtype=np.float32)
     xx, zz = np.meshgrid(xs, zs)
     radial = np.sqrt(xx * xx + zz * zz).astype(np.float32)
 
@@ -279,7 +311,6 @@ def generate_water_disc_preview(options: Dict[str, Any] | None = None) -> Dict[s
     obstacle = radial <= sphere_r
     water_mask = ocean_disc & ~obstacle
     shore_distance = np.maximum(0.0, radial - sphere_r).astype(np.float32)
-    pixel_m = (ocean_r * 2.0) / max(1, size - 1)
 
     coastal_variation = float(opts.get("coastalVariationStrength", 0.15) or 0.15)
     coast_noise = box_blur(value_noise((size, size), max(8, size * 0.12), seed + 11), 1)
@@ -287,17 +318,17 @@ def generate_water_disc_preview(options: Dict[str, Any] | None = None) -> Dict[s
         1.0 + coastal_variation * coast_noise * 0.22, 0.55, 1.35
     )
 
-    bathy = distance_to_bathymetry01(effective_distance, water_mask, band_edges)
+    band_smooth = _water_band_smoothness(opts)
+    bathy = distance_to_bathy01_bands(effective_distance, water_mask, band_edges)
     if smooth_px > 0:
         soft = box_blur(bathy, smooth_px)
-        bathy = np.where(water_mask, soft, 0.0)
-        bathy = distance_to_bathymetry01(effective_distance, water_mask, band_edges)
+        bathy = np.where(water_mask, soft, 0.0).astype(np.float32)
 
     if reef_strength > 0:
         reef = box_blur(value_noise((size, size), max(6, size * 0.06), seed + 29), 1)
         shallow_w = 1.0 - smoothstep(band_edges[2], band_edges[-2], effective_distance)
         perturbed = effective_distance + reef * reef_strength * shallow_w * band_edges[2] * 0.35
-        bathy = distance_to_bathymetry01(perturbed, water_mask, band_edges)
+        bathy = distance_to_bathy01_bands(perturbed, water_mask, band_edges)
 
     land = obstacle
     max_depth = float(opts.get("maxOceanDepthM", 180.0) or 180.0)
@@ -310,24 +341,15 @@ def generate_water_disc_preview(options: Dict[str, Any] | None = None) -> Dict[s
     foam_inner = max(pixel_m * 0.35, foam_width * 0.12)
     foam_outer = max(foam_width, pixel_m * 1.25)
     foam = (1.0 - smoothstep(foam_inner, foam_outer, effective_distance)) * water_mask
+    foam *= ocean_disc_rim_fade(radial, ocean_r, rim_fade_m)
     foam = np.clip(foam * (0.7 + 0.3 * foam_noise) * foam_strength, 0.0, 1.0).astype(np.float32)
 
     wave_strength = float(opts.get("waterNoiseStrength", 0.1) or 0.1)
     wave_scale = float(opts.get("waterNoiseScaleM", 85.0) or 85.0)
     wave = ((value_noise((size, size), max(5, wave_scale / pixel_m * 0.8), seed + 101) + 1.0) * 0.5).astype(np.float32)
 
-    water_color = color_ramp(bathy).astype(np.float32)
-    if wave_strength > 0:
-        sparkle = value_noise((size, size), max(4, wave_scale / pixel_m * 0.4), seed + 203)
-        water_color = np.clip(
-            water_color + sparkle[..., None] * wave_strength * 55.0,
-            0,
-            255,
-        )
-    if np.any(foam > 0):
-        foam_rgb = np.array([245.0, 252.0, 255.0], dtype=np.float32)
-        water_color = water_color * (1.0 - foam[..., None]) + foam_rgb * foam[..., None]
-    water_color = water_color.round().astype(np.uint8)
+    # Depth colors only — foam and surface waves are separate masks / 3D overlays.
+    water_color = color_ramp(bathy, smoothness=band_smooth).astype(np.uint8)
     water_color[~water_mask] = 0
 
     return _package_bathymetry_arrays(

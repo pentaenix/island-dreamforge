@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import TerrainViewport, { MATERIALS } from './TerrainViewport.jsx';
 import HeightsStudio from './HeightsStudio.jsx';
+import { SceneLayerCard } from './layerUi.jsx';
 import TexturesStudio from './TexturesStudio.jsx';
 import { DEFAULT_TEXTURE_SETTINGS } from './textureSettings.js';
 import ExportProfilePanel from './ExportProfilePanel.jsx';
@@ -16,9 +17,27 @@ import {
   getIslandHorizonScale,
   getMetersPerPixel,
   getOceanDiscRadiusM,
+  getWaterDiscPreviewSpanM,
+  getBandsPlaneDimsM,
+  getWaterMapRadiusM,
   normalizeWorldSettings,
 } from './worldSettings.js';
 import { buildHeightGenFingerprint } from './heightGenFingerprint.js';
+import ProfilesBar from './ProfilesBar.jsx';
+import { fileFromDataUrl, snapshotFromAppState } from './projectSnapshot.js';
+import {
+  createProfile,
+  deleteProfile,
+  duplicateProfile,
+  ensureActiveProfile,
+  exportProfileJson,
+  importProfileFromJson,
+  loadProfileDocument,
+  loadProfileIndex,
+  persistActiveProfile,
+  renameProfile,
+  setActiveProfile,
+} from './profileStore.js';
 
 const waterOnlyStarter = [
   { hex: '#b7d3dc', height: 0, tolerance: 0, weight: 1, role: 'water' },
@@ -55,8 +74,6 @@ function rgbFromHex(hex) {
 }
 
 
-const PROJECT_STORE = 'island-dreamforge-autosave-v7';
-
 const DEFAULT_OPTIONS = {
   maxHeightM: 500,
   designedBandMode: true,
@@ -83,6 +100,7 @@ const DEFAULT_OPTIONS = {
   spikeRemovalStrength: 0.78,
   spikeThresholdM: 24,
   spikeRemovalPasses: 3,
+  applyFlatSections: true,
   slopeLimitStrength: 0.5,
   slopeLimitMPerPx: 62,
   slopeLimitIterations: 3,
@@ -103,7 +121,13 @@ const DEFAULT_WATER_SETTINGS = { enabled: true, seaLevelM: 0 };
 const DEFAULT_EXPORT_SETTINGS = {
   oceanRadiusAuto: true,
   oceanRadiusM: 1700,
+  waterMapRadiusAuto: true,
+  waterMapRadiusM: 3500,
   maxOceanDepthM: 180,
+  waterBandStepM: 12,
+  waterBandStepIncreaseM: 16,
+  waterBandStepGrowthPower: 2,
+  oceanFoamRimFadeM: 48,
   shoreShelfWidthM: 24,
   shallowShelfM: 24,
   midWaterDistanceM: 70,
@@ -117,6 +141,7 @@ const DEFAULT_EXPORT_SETTINGS = {
   reefNoiseStrength: 0.08,
   foamWidthM: 12,
   foamStrength: 0.2,
+  waterBandSmoothness: 0.35,
   waterColorSteps: 6,
   waterNoiseStrength: 0.1,
   waterNoiseScaleM: 85,
@@ -128,6 +153,8 @@ const DEFAULT_EXPORT_SETTINGS = {
   gameDetail: 'game_export_medium',
   chunkSize: 16,
   showSeafloorPreview: false,
+  keepLargestIsland: false,
+  minIslandAreaPx: 16,
   previewSphereRadiusM: 220,
 };
 
@@ -151,51 +178,6 @@ const TOOL_DEFS = [
 ];
 
 const DEFAULT_BRUSH = { size: 46, strength: 0.48, opacity: 0.85, flattenM: 8, edgeSoftness: 0.72, noise: 0.18 };
-
-function openProjectDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open('IslandDreamforgeLocalProject', 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('kv');
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function idbSet(key, value) {
-  const db = await openProjectDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readwrite');
-    tx.objectStore('kv').put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function idbGet(key) {
-  const db = await openProjectDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readonly');
-    const req = tx.objectStore('kv').get(key);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function idbDelete(key) {
-  const db = await openProjectDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readwrite');
-    tx.objectStore('kv').delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-function fileFromDataUrl(dataUrl, name = 'restored-image.png') {
-  if (!dataUrl) return null;
-  const blob = dataUrlToBlob(dataUrl);
-  return new File([blob], name, { type: blob.type || 'image/png' });
-}
 
 async function sampleCornerHexFromFile(file) {
   if (!file) return '#b7d3dc';
@@ -223,7 +205,11 @@ async function sampleCornerHexFromFile(file) {
 function newLayer(kind) {
   const base = {
     id: `${kind}_${Date.now()}_${Math.round(Math.random() * 9999)}`,
-    name: kind === 'water' ? 'Water overlay' : kind === 'structure' ? 'Structure overlay' : kind === 'marker' ? 'Marker / POI overlay' : 'Texture/noise overlay',
+    name: kind === 'water' ? 'Water overlay'
+      : kind === 'structure' ? 'Structure overlay'
+        : kind === 'marker' ? 'Marker / POI overlay'
+          : kind === 'flat' ? 'Flat section'
+            : 'Texture/noise overlay',
     kind,
     enabled: true,
     file: null,
@@ -233,74 +219,23 @@ function newLayer(kind) {
   if (kind === 'water') return { ...base, mode: 'visual-only', carveDepthM: 1.5, lakeDepthM: 0.75, bankSmoothPx: 14, waterfallDropM: 18, fastRiverGrade: 0.25, maskThreshold: 8 };
   if (kind === 'structure') return { ...base, shape: 'box', objectHeightM: 8, flattenGround: true, snapToGround: true, maskThreshold: 8 };
   if (kind === 'marker') return { ...base, markerType: 'poi', namePrefix: 'Point', radiusM: 4, maskThreshold: 8 };
+  if (kind === 'flat') return { ...base, maskThreshold: 8, edgeSoftPx: 6, heightMode: 'median', flattenStrength: 0.72 };
   return { ...base, material: 'trees', noise: 0.35, edgeSoftness: 0.65, maskThreshold: 8 };
 }
 
-function LayerCard({ layer, active, onSelect, onChange, onFile, onAnalyze, onExport, onDelete, onClear }) {
-  return (
-    <div className={`layer-card ${active ? 'active' : ''} ${!layer.enabled ? 'disabled' : ''}`} onClick={() => onSelect(layer.id)}>
-      <div className="layer-head">
-        <input value={layer.name} onChange={e => onChange({ name: e.target.value })} onClick={e => e.stopPropagation()} />
-        <select value={layer.kind} onChange={e => onChange({ kind: e.target.value, analysis: null })} onClick={e => e.stopPropagation()}>
-          <option value="water">Water</option>
-          <option value="structure">Structure</option>
-          <option value="marker">Marker / POI</option>
-          <option value="texture">Texture / Noise</option>
-        </select>
-      </div>
-      <div className="layer-toolbar" onClick={e => e.stopPropagation()}>
-        <label className="checkline mini"><input type="checkbox" checked={layer.enabled !== false} onChange={e => onChange({ enabled: e.target.checked })} /> Visible</label>
-        <button onClick={onClear}>Clear</button>
-        <button className="danger" onClick={onDelete}>Delete</button>
-      </div>
-      <div className="layer-body">
-        <label className="file-small">Overlay image<input type="file" accept="image/*" onClick={e => e.stopPropagation()} onChange={e => onFile(e.target.files[0])} /></label>
-        {layer.url && <div className="thumb-wrap">
-          <button className="thumb-x" onClick={(e) => { e.stopPropagation(); onChange({ file: null, url: '', analysis: null }); }} title="Remove this overlay image">×</button>
-          <img className="layer-thumb" src={layer.analysis?.preview || layer.url} alt={layer.name} />
-        </div>}
-
-        {layer.kind === 'water' && <>
-          <label>Water effect<select value={layer.mode || 'visual-only'} onChange={e => onChange({ mode: e.target.value })}>
-            <option value="visual-only">Visual water only — no terrain change</option>
-            <option value="shallow-indent">Small indent for water bed</option>
-            <option value="riverbed">Riverbed / stream groove</option>
-            <option value="lake-flatten">Flatten calm lakes locally</option>
-            <option value="ocean-shore">Ocean shoreline shelf</option>
-          </select></label>
-          <Slider label="Indent depth" value={layer.carveDepthM ?? 1.5} min={0} max={12} step={0.1} suffix="m" onChange={v => onChange({ carveDepthM: v })} />
-          <Slider label="Bank softness" value={layer.bankSmoothPx ?? 14} min={0} max={90} step={1} suffix="px" onChange={v => onChange({ bankSmoothPx: v })} />
-          <Slider label="Waterfall drop" value={layer.waterfallDropM ?? 18} min={1} max={120} step={1} suffix="m" onChange={v => onChange({ waterfallDropM: v })} />
-        </>}
-        {layer.kind === 'structure' && <>
-          <label>Shape<select value={layer.shape || 'box'} onChange={e => onChange({ shape: e.target.value })}>
-            <option value="box">Box from painted footprint</option>
-            <option value="cylinder">Cylinder from painted footprint</option>
-            <option value="sphere">Sphere at painted islands</option>
-          </select></label>
-          <Slider label="Object height" value={layer.objectHeightM ?? 8} min={1} max={120} step={1} suffix="m" onChange={v => onChange({ objectHeightM: v })} />
-          <label className="checkline"><input type="checkbox" checked={!!layer.flattenGround} onChange={e => onChange({ flattenGround: e.target.checked })} /> Flatten ground under objects</label>
-          <label className="checkline"><input type="checkbox" checked={layer.snapToGround !== false} onChange={e => onChange({ snapToGround: e.target.checked })} /> Snap to final smoothed terrain</label>
-        </>}
-        {layer.kind === 'marker' && <>
-          <label>Marker type<input value={layer.markerType || 'poi'} onChange={e => onChange({ markerType: e.target.value })} /></label>
-          <label>Name prefix<input value={layer.namePrefix || 'Point'} onChange={e => onChange({ namePrefix: e.target.value })} /></label>
-        </>}
-        {layer.kind === 'texture' && <>
-          <label>Material<select value={layer.material || 'trees'} onChange={e => onChange({ material: e.target.value })}>{MATERIALS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
-          <Slider label="Noise" value={layer.noise ?? 0.35} min={0} max={1} step={0.01} onChange={v => onChange({ noise: v })} />
-          <Slider label="Soft transition" value={layer.edgeSoftness ?? 0.65} min={0} max={1} step={0.01} onChange={v => onChange({ edgeSoftness: v })} />
-        </>}
-        <div className="actions compact">
-          <button onClick={(e) => { e.stopPropagation(); onAnalyze(); }}>Analyze layer</button>
-          {layer.analysis && <button onClick={(e) => { e.stopPropagation(); onExport(); }}>Export JSON</button>}
-        </div>
-        {layer.analysis && <p className="small muted">{layer.analysis.featureCount} feature(s). {layer.analysis.summary?.waterfalls ? `${layer.analysis.summary.waterfalls} waterfall candidate(s).` : ''}</p>}
-      </div>
-    </div>
-  );
+function enabledFlatLayers(layerList) {
+  return (layerList || []).filter((l) => l.kind === 'flat' && l.enabled !== false && l.file);
 }
 
+const STAGE_COUNT = 4;
+
+/** Old saves used step 4 = Layers, step 5 = 3D. */
+function normalizeRestoredStage(raw) {
+  const s = Number(raw) || 1;
+  if (s >= 5) return 4;
+  if (s === 4) return 1;
+  return Math.min(STAGE_COUNT, Math.max(1, s));
+}
 
 export default function App() {
   const viewportRef = useRef(null);
@@ -309,6 +244,12 @@ export default function App() {
   const [mapUrl, setMapUrl] = useState('');
   const [mapVersion, setMapVersion] = useState(0);
   const restoreDoneRef = useRef(false);
+  const profileSwitchingRef = useRef(false);
+  const [activeProfileId, setActiveProfileId] = useState(null);
+  const [activeProfileName, setActiveProfileName] = useState('Profile');
+  const [profileList, setProfileList] = useState([]);
+  const [profileLastSavedAt, setProfileLastSavedAt] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
   const [samples, setSamples] = useState(waterOnlyStarter);
   const [picked, setPicked] = useState('#b7d3dc');
   const [newHeight, setNewHeight] = useState(0);
@@ -346,13 +287,18 @@ export default function App() {
   const metersPerPixel = getMetersPerPixel(worldSettings, mapSizePx);
 
   const currentHeightFingerprint = useMemo(
-    () => buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius }),
-    [mapUrl, samples, options, similarRadius],
+    () => buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius, layers }),
+    [mapUrl, samples, options, similarRadius, layers],
   );
   const heightOutOfDate = !!heightPreview && currentHeightFingerprint !== heightGenFingerprint;
   const heightGenerating = typeof busy === 'string' && busy.toLowerCase().includes('height');
   const canGenerateHeightmap = !!mapFile && samples.length > 0
     && Math.max(...samples.map((s) => Number(s.height || 0))) > Number(options.seaLevelM || 0) + 0.5;
+
+  const bandsPlaneM = useMemo(
+    () => getBandsPlaneDimsM(worldSettings, mapSizePx, exportSettings),
+    [worldSettings, mapSizePx, exportSettings],
+  );
 
   const islandExportOptions = useMemo(() => ({
     ...exportSettings,
@@ -362,7 +308,9 @@ export default function App() {
     depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
     verticalScale: Number(worldSettings.verticalExaggeration || 1) * getIslandHorizonScale(worldSettings),
     islandHeightScale: getIslandHorizonScale(worldSettings),
-    oceanRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    oceanRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
+    bandsPlaneWidthM: bandsPlaneM.width,
+    bandsPlaneDepthM: bandsPlaneM.depth,
     world: {
       widthM: Number(worldSettings.widthM || 1480),
       depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
@@ -374,7 +322,7 @@ export default function App() {
       featureScale: Number(worldSettings.featureScale ?? 1),
     },
     ocean: {
-      radiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+      radiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
       maxDepthM: Number(exportSettings.maxOceanDepthM || 220),
       shoreShelfWidthM: Number(exportSettings.shoreShelfWidthM || exportSettings.shallowShelfM || 24),
       shallowShelfM: Number(exportSettings.shallowShelfM || exportSettings.shoreShelfWidthM || 24),
@@ -397,12 +345,23 @@ export default function App() {
       game: exportSettings.gameDetail,
       chunkSize: Number(exportSettings.chunkSize || 16),
     },
-  }), [exportSettings, options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM]);
+  }), [exportSettings, options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, bandsPlaneM, mapSizePx]);
   const waterPreviewOptions = useMemo(() => ({
     ...exportSettings,
-    oceanRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    widthM: Number(worldSettings.widthM || 1480),
+    depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
+    lockAspect: worldSettings.lockAspect,
+    mapWidthPx: mapSizePx?.width,
+    mapHeightPx: mapSizePx?.height,
+    oceanRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
+    oceanRadiusAuto: exportSettings.waterMapRadiusAuto !== false,
+    waterDiscPreviewSpanM: getWaterDiscPreviewSpanM(
+      worldSettings,
+      mapSizePx,
+      getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
+    ),
     previewSphereRadiusM: Number(exportSettings.previewSphereRadiusM || 120),
-  }), [exportSettings, worldSettings, mapSizePx]);
+  }), [exportSettings, worldSettings, derivedDepthM, mapSizePx]);
 
   const waterPreviewKey = useMemo(() => JSON.stringify(waterPreviewOptions), [waterPreviewOptions]);
 
@@ -411,7 +370,11 @@ export default function App() {
     seaLevelM: Number(options.seaLevelM ?? waterSettings.seaLevelM ?? 0),
     widthM: Number(worldSettings.widthM || 1480),
     depthM: Number(derivedDepthM || worldSettings.depthM || 1086),
-    oceanRadiusM: getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings),
+    waterMapRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
+    waterMapRadiusAuto: exportSettings.waterMapRadiusAuto !== false,
+    bandsPlaneWidthM: bandsPlaneM.width,
+    bandsPlaneDepthM: bandsPlaneM.depth,
+    oceanRadiusM: getWaterMapRadiusM(worldSettings, mapSizePx, exportSettings),
     islandHeightScale: getIslandHorizonScale(worldSettings),
     shallowShelfM: Number(exportSettings.shallowShelfM || exportSettings.shoreShelfWidthM || 24),
     midShelfM: Number(exportSettings.midShelfM || exportSettings.midWaterDistanceM || 70),
@@ -420,7 +383,49 @@ export default function App() {
     coastalVariationStrength: Number(exportSettings.coastalVariationStrength ?? 0.18),
     reefNoiseStrength: Number(exportSettings.reefNoiseStrength ?? 0.05),
     foamWidthM: Number(exportSettings.foamWidthM || 10),
-  }), [options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, exportSettings, mapSizePx]);
+    waterBandStepM: Number(exportSettings.waterBandStepM ?? 12),
+    waterBandStepIncreaseM: Number(exportSettings.waterBandStepIncreaseM ?? 16),
+    waterBandStepGrowthPower: Number(exportSettings.waterBandStepGrowthPower ?? 2),
+    waterBandSmoothness: Number(exportSettings.waterBandSmoothness ?? 0.35),
+  }), [options.maxHeightM, options.seaLevelM, waterSettings.seaLevelM, worldSettings, derivedDepthM, exportSettings, mapSizePx, bandsPlaneM]);
+
+  function applySnapshotToState(saved) {
+    if (!saved) return;
+    setStage(normalizeRestoredStage(saved.stage));
+    setMapUrl(saved.mapUrl || '');
+    setMapFile(saved.mapUrl ? fileFromDataUrl(saved.mapUrl, saved.mapFileName || 'restored_map.png') : null);
+    setSamples(saved.samples?.length ? saved.samples : waterOnlyStarter);
+    setPicked(saved.picked || saved.samples?.[0]?.hex || '#b7d3dc');
+    setNewHeight(saved.newHeight ?? 0);
+    setDominant(saved.dominant || []);
+    setCleanedPreview(saved.cleanedPreview || '');
+    setHeightmap16(saved.heightmap16 || '');
+    setHeightPreview(saved.heightPreview || '');
+    setHeightGenFingerprint(saved.heightGenFingerprint || '');
+    setBakedHeightmap16(saved.bakedHeightmap16 || '');
+    setBakedPreview(saved.bakedPreview || '');
+    setWaterMask(saved.waterMask || '');
+    setOptions({ ...DEFAULT_OPTIONS, ...(saved.options || {}) });
+    setWaterSettings({ ...DEFAULT_WATER_SETTINGS, ...(saved.waterSettings || {}) });
+    setTextureSettings({ ...DEFAULT_TEXTURE_SETTINGS, ...(saved.textureSettings || {}) });
+    setExportSettings({ ...DEFAULT_EXPORT_SETTINGS, ...(saved.exportSettings || {}) });
+    setDerivedMaps(saved.derivedMaps || null);
+    setWorldSettings(normalizeWorldSettings(saved.worldSettings || {}));
+    setMapSizePx(saved.mapSizePx || { width: 0, height: 0 });
+    setTool(saved.tool || 'move');
+    setSelectedMaterial(saved.selectedMaterial || 'trees');
+    setBrush({ ...DEFAULT_BRUSH, ...(saved.brush || {}) });
+    setSimilarRadius(saved.similarRadius ?? 18);
+    setAnalyzeCount(saved.analyzeCount ?? 12);
+    setAdvancedOpen(!!saved.advancedOpen);
+    const restoredLayers = (saved.layers || []).map((l) => ({
+      ...l,
+      file: l.url ? fileFromDataUrl(l.url, `${l.kind || 'layer'}_overlay.png`) : null,
+    }));
+    setLayers(restoredLayers);
+    setActiveLayerId(saved.activeLayerId || restoredLayers[0]?.id || null);
+    setMapVersion((v) => v + 1);
+  }
 
   const recipe = useMemo(() => ({
     app: 'Island Dreamforge',
@@ -438,69 +443,120 @@ export default function App() {
 
   React.useEffect(() => {
     let alive = true;
-    async function restoreProject() {
+    async function bootProfiles() {
       try {
-        const saved = await idbGet(PROJECT_STORE);
+        const { index, snapshot, profileId, profileName } = await ensureActiveProfile();
         if (!alive) return;
-        if (saved?.version >= 6) {
-          {
-            let restoredStage = Number(saved.stage) || 1;
-            if (restoredStage >= 4) restoredStage += 1;
-            setStage(restoredStage);
-          }
-          setMapUrl(saved.mapUrl || '');
-          setMapFile(saved.mapUrl ? fileFromDataUrl(saved.mapUrl, saved.mapFileName || 'restored_map.png') : null);
-          setSamples(saved.samples?.length ? saved.samples : waterOnlyStarter);
-          setPicked(saved.picked || saved.samples?.[0]?.hex || '#b7d3dc');
-          setNewHeight(saved.newHeight ?? 0);
-          setDominant(saved.dominant || []);
-          setCleanedPreview(saved.cleanedPreview || '');
-          setHeightmap16(saved.heightmap16 || '');
-          setHeightPreview(saved.heightPreview || '');
-          setBakedHeightmap16(saved.bakedHeightmap16 || '');
-          setBakedPreview(saved.bakedPreview || '');
-          setWaterMask(saved.waterMask || '');
-          setOptions({ ...DEFAULT_OPTIONS, ...(saved.options || {}) });
-          setWaterSettings({ ...DEFAULT_WATER_SETTINGS, ...(saved.waterSettings || {}) });
-          setTextureSettings({ ...DEFAULT_TEXTURE_SETTINGS, ...(saved.textureSettings || {}) });
-          setExportSettings({ ...DEFAULT_EXPORT_SETTINGS, ...(saved.exportSettings || {}) });
-          setDerivedMaps(saved.derivedMaps || null);
-          {
-            setWorldSettings(normalizeWorldSettings(saved.worldSettings || {}));
-          }
-          setMapSizePx(saved.mapSizePx || { width: 0, height: 0 });
-          setTool(saved.tool || 'move');
-          setSelectedMaterial(saved.selectedMaterial || 'trees');
-          setBrush({ ...DEFAULT_BRUSH, ...(saved.brush || {}) });
-          const restoredLayers = (saved.layers || []).map((l) => ({
-            ...l,
-            file: l.url ? fileFromDataUrl(l.url, `${l.kind || 'layer'}_overlay.png`) : null,
-          }));
-          setLayers(restoredLayers);
-          setActiveLayerId(saved.activeLayerId || restoredLayers[0]?.id || null);
-          setMapVersion(v => v + 1);
-        }
+        setProfileList(index.profiles || []);
+        setActiveProfileId(profileId);
+        setActiveProfileName(profileName);
+        applySnapshotToState(snapshot);
+        const doc = await loadProfileDocument(profileId);
+        if (doc?.savedAt) setProfileLastSavedAt(doc.savedAt);
       } catch (e) {
-        console.warn('Autosave restore failed', e);
+        console.warn('Profile restore failed', e);
       } finally {
         restoreDoneRef.current = true;
       }
     }
-    restoreProject();
+    bootProfiles();
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   React.useEffect(() => {
-    if (!restoreDoneRef.current) return;
-    const timer = setTimeout(() => {
-      const cleanLayers = layers.map(({ file, ...l }) => l);
-      idbSet(PROJECT_STORE, {
-        version: 7,
-        savedAt: new Date().toISOString(),
+    if (!restoreDoneRef.current || !activeProfileId || profileSwitchingRef.current) return;
+    const timer = setTimeout(async () => {
+      setProfileSaving(true);
+      try {
+        const savedAt = await persistActiveProfile(
+          activeProfileId,
+          activeProfileName,
+          snapshotFromAppState({
+            stage,
+            mapUrl,
+            mapFile,
+            samples,
+            picked,
+            newHeight,
+            dominant,
+            cleanedPreview,
+            heightmap16,
+            heightPreview,
+            heightGenFingerprint,
+            bakedHeightmap16,
+            bakedPreview,
+            waterMask,
+            layers,
+            activeLayerId,
+            options,
+            waterSettings,
+            textureSettings,
+            exportSettings,
+            derivedMaps,
+            worldSettings,
+            mapSizePx,
+            tool,
+            selectedMaterial,
+            brush,
+            similarRadius,
+            analyzeCount,
+            advancedOpen,
+          }),
+        );
+        setProfileLastSavedAt(savedAt);
+        const index = await loadProfileIndex();
+        setProfileList(index.profiles || []);
+      } catch (e) {
+        console.warn('Profile autosave failed', e);
+      } finally {
+        setProfileSaving(false);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [
+    activeProfileId,
+    activeProfileName,
+    stage,
+    mapUrl,
+    samples,
+    picked,
+    newHeight,
+    dominant,
+    cleanedPreview,
+    heightmap16,
+    heightPreview,
+    heightGenFingerprint,
+    bakedHeightmap16,
+    bakedPreview,
+    waterMask,
+    layers,
+    activeLayerId,
+    options,
+    waterSettings,
+    textureSettings,
+    exportSettings,
+    derivedMaps,
+    worldSettings,
+    mapSizePx,
+    tool,
+    selectedMaterial,
+    brush,
+    similarRadius,
+    analyzeCount,
+    advancedOpen,
+    mapFile,
+  ]);
+
+  async function flushProfileSave() {
+    if (!activeProfileId) return;
+    const savedAt = await persistActiveProfile(
+      activeProfileId,
+      activeProfileName,
+      snapshotFromAppState({
         stage,
         mapUrl,
-        mapFileName: mapFile?.name || 'map.png',
+        mapFile,
         samples,
         picked,
         newHeight,
@@ -508,10 +564,11 @@ export default function App() {
         cleanedPreview,
         heightmap16,
         heightPreview,
+        heightGenFingerprint,
         bakedHeightmap16,
         bakedPreview,
         waterMask,
-        layers: cleanLayers,
+        layers,
         activeLayerId,
         options,
         waterSettings,
@@ -523,10 +580,126 @@ export default function App() {
         tool,
         selectedMaterial,
         brush,
-      }).catch(e => console.warn('Autosave failed', e));
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [stage, mapUrl, samples, picked, newHeight, dominant, cleanedPreview, heightmap16, heightPreview, bakedHeightmap16, bakedPreview, waterMask, layers, activeLayerId, options, waterSettings, textureSettings, exportSettings, derivedMaps, worldSettings, mapSizePx, tool, selectedMaterial, brush, mapFile]);
+        similarRadius,
+        analyzeCount,
+        advancedOpen,
+      }),
+    );
+    setProfileLastSavedAt(savedAt);
+  }
+
+  async function handleSelectProfile(profileId) {
+    if (!profileId || profileId === activeProfileId) return;
+    setBusy('Loading profile…');
+    profileSwitchingRef.current = true;
+    try {
+      await flushProfileSave();
+      const { snapshot, profileName } = await setActiveProfile(profileId);
+      setActiveProfileId(profileId);
+      setActiveProfileName(profileName);
+      applySnapshotToState(snapshot);
+      const index = await loadProfileIndex();
+      setProfileList(index.profiles || []);
+      const doc = await loadProfileDocument(profileId);
+      setProfileLastSavedAt(doc?.savedAt || '');
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      profileSwitchingRef.current = false;
+      setBusy('');
+    }
+  }
+
+  async function handleNewProfile() {
+    const name = window.prompt('Name for new profile', `Profile ${profileList.length + 1}`);
+    if (name === null) return;
+    profileSwitchingRef.current = true;
+    try {
+      await flushProfileSave();
+      const { id, name: profileName, snapshot } = await createProfile({ name: name || undefined, snapshot: null });
+      const index = await loadProfileIndex();
+      setProfileList(index.profiles || []);
+      setActiveProfileId(id);
+      setActiveProfileName(profileName);
+      applySnapshotToState(snapshot);
+      setProfileLastSavedAt(new Date().toISOString());
+      setError('');
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      profileSwitchingRef.current = false;
+    }
+  }
+
+  async function handleDuplicateProfile() {
+    if (!activeProfileId) return;
+    profileSwitchingRef.current = true;
+    try {
+      await flushProfileSave();
+      const { id, name, snapshot } = await duplicateProfile(activeProfileId);
+      const index = await loadProfileIndex();
+      setProfileList(index.profiles || []);
+      setActiveProfileId(id);
+      setActiveProfileName(name);
+      applySnapshotToState(snapshot);
+      setProfileLastSavedAt(new Date().toISOString());
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      profileSwitchingRef.current = false;
+    }
+  }
+
+  async function handleRenameProfile(name) {
+    if (!activeProfileId || !name?.trim()) return;
+    await renameProfile(activeProfileId, name.trim());
+    setActiveProfileName(name.trim());
+    const index = await loadProfileIndex();
+    setProfileList(index.profiles || []);
+  }
+
+  async function handleDeleteProfile() {
+    if (!activeProfileId || profileList.length <= 1) return;
+    if (!window.confirm(`Delete profile "${activeProfileName}"? This cannot be undone.`)) return;
+    profileSwitchingRef.current = true;
+    try {
+      const next = await deleteProfile(activeProfileId);
+      const index = await loadProfileIndex();
+      setProfileList(index.profiles || []);
+      setActiveProfileId(next.profileId);
+      setActiveProfileName(next.profileName);
+      applySnapshotToState(next.snapshot);
+      const doc = await loadProfileDocument(next.profileId);
+      setProfileLastSavedAt(doc?.savedAt || '');
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      profileSwitchingRef.current = false;
+    }
+  }
+
+  async function handleImportProfileJson(file) {
+    setBusy('Importing profile…');
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      profileSwitchingRef.current = true;
+      await flushProfileSave();
+      const { id, name, snapshot } = await importProfileFromJson(parsed, { setActive: true });
+      const index = await loadProfileIndex();
+      setProfileList(index.profiles || []);
+      setActiveProfileId(id);
+      setActiveProfileName(name);
+      applySnapshotToState(snapshot);
+      const doc = await loadProfileDocument(id);
+      setProfileLastSavedAt(doc?.savedAt || '');
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      profileSwitchingRef.current = false;
+      setBusy('');
+    }
+  }
 
   async function handleFile(file, setterFile, setterUrl) {
     if (!file) return;
@@ -568,7 +741,7 @@ export default function App() {
   }
 
   async function resetProject() {
-    await idbDelete(PROJECT_STORE).catch(() => {});
+    profileSwitchingRef.current = true;
     setStage(1);
     setMapFile(null); setMapUrl(''); setMapVersion(v => v + 1);
     setSamples(waterOnlyStarter); setPicked('#b7d3dc'); setNewHeight(0);
@@ -587,6 +760,48 @@ export default function App() {
     setAdvancedOpen(false);
     setTool('move'); setSelectedMaterial('trees');
     setError(''); setBusy('');
+    try {
+      if (activeProfileId) {
+        const savedAt = await persistActiveProfile(
+          activeProfileId,
+          activeProfileName,
+          snapshotFromAppState({
+            stage: 1,
+            mapUrl: '',
+            mapFile: null,
+            samples: waterOnlyStarter,
+            picked: '#b7d3dc',
+            newHeight: 0,
+            dominant: [],
+            cleanedPreview: '',
+            heightmap16: '',
+            heightPreview: '',
+            heightGenFingerprint: '',
+            bakedHeightmap16: '',
+            bakedPreview: '',
+            waterMask: '',
+            layers: [],
+            activeLayerId: null,
+            options: { ...DEFAULT_OPTIONS },
+            waterSettings: { ...DEFAULT_WATER_SETTINGS },
+            textureSettings: { ...DEFAULT_TEXTURE_SETTINGS },
+            exportSettings: { ...DEFAULT_EXPORT_SETTINGS },
+            derivedMaps: null,
+            worldSettings: { ...DEFAULT_WORLD_SETTINGS },
+            mapSizePx: { width: 0, height: 0 },
+            tool: 'move',
+            selectedMaterial: 'trees',
+            brush: { ...DEFAULT_BRUSH },
+            similarRadius: 18,
+            analyzeCount: 12,
+            advancedOpen: false,
+          }),
+        );
+        setProfileLastSavedAt(savedAt);
+      }
+    } finally {
+      profileSwitchingRef.current = false;
+    }
   }
 
   function addHeightPoint(hex = picked) {
@@ -655,6 +870,16 @@ export default function App() {
       form.append('samples', JSON.stringify(fixedSamples));
       form.append('options', JSON.stringify(options));
       form.append('response_format', responseFormat);
+      const flatLayers = enabledFlatLayers(layers);
+      if (options.applyFlatSections !== false && flatLayers.length) {
+        form.append('flat_layer_options', JSON.stringify(flatLayers.map((l) => ({
+          maskThreshold: l.maskThreshold ?? 8,
+          edgeSoftPx: l.edgeSoftPx ?? 0,
+          heightMode: l.heightMode || 'median',
+          flattenStrength: l.flattenStrength ?? 0.72,
+        }))));
+        for (const layer of flatLayers) form.append('flat_layers', layer.file);
+      }
       if (responseFormat === 'zip') {
         const blob = await postForm('/api/heightmap', form, true);
         downloadBlob(blob, 'island_heightmap_stage1.zip');
@@ -662,7 +887,7 @@ export default function App() {
         const data = await postForm('/api/heightmap', form);
         setHeightmap16(data.heightmap16);
         setHeightPreview(data.preview8);
-        setHeightGenFingerprint(buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius }));
+        setHeightGenFingerprint(buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius, layers }));
         setBakedHeightmap16(''); setBakedPreview('');
         if (data.warning) setError(data.warning);
       }
@@ -731,7 +956,7 @@ export default function App() {
         setBakedPreview(data.preview8);
         setWaterMask(data.waterMask);
         setWaterSettings(prev => ({ ...prev, seaLevelM: options.seaLevelM || 0 }));
-        setStage(4);
+        setStage(3);
       }
     } catch (e) { setError(e.message); }
     finally { setBusy(''); }
@@ -826,12 +1051,12 @@ export default function App() {
   }, [stage, waterPreviewKey]);
 
   React.useEffect(() => {
-    if (stage !== 5 || !finalHeight) return;
+    if (!finalHeight) return;
     const timer = setTimeout(() => {
       refreshDerivedMaps({ silent: true });
     }, 450);
     return () => clearTimeout(timer);
-  }, [stage, finalHeight, derivedPreviewKey]);
+  }, [finalHeight, derivedPreviewKey]);
 
   async function exportWebIsland() {
     if (!finalHeight) return setError('Generate a heightmap first.');
@@ -872,22 +1097,36 @@ export default function App() {
         <div>
           <p className="eyebrow">Fantasy Map → Game Terrain Studio</p>
           <h1>Island Dreamforge</h1>
-          <p className="lede">Pixel-perfect color heights, smooth automatic terrain bands, reversible water, structure overlays, marker exports, texture layers, and 3D sculpting.</p>
+          <p className="lede">Color heights and flat-section masks, procedural textures, water tuning, and 3D sculpting with scene overlays.</p>
         </div>
         <div className="api-pill">Backend: <span>{API_URL}</span></div>
       </header>
+
+      <ProfilesBar
+        profiles={profileList}
+        activeProfileId={activeProfileId}
+        activeProfileName={activeProfileName}
+        lastSavedAt={profileLastSavedAt}
+        saving={profileSaving}
+        onSelectProfile={handleSelectProfile}
+        onNewProfile={handleNewProfile}
+        onDuplicateProfile={handleDuplicateProfile}
+        onRenameProfile={handleRenameProfile}
+        onDeleteProfile={handleDeleteProfile}
+        onExportJson={() => activeProfileId && exportProfileJson(activeProfileId)}
+        onImportJson={handleImportProfileJson}
+      />
 
       <nav className="stage-tabs">
         <button className={stage === 1 ? 'active' : ''} onClick={() => setStage(1)}>1 · Heights</button>
         <button className={stage === 2 ? 'active' : ''} onClick={() => setStage(2)}>2 · Textures</button>
         <button className={stage === 3 ? 'active' : ''} onClick={() => setStage(3)}>3 · Water</button>
-        <button className={stage === 4 ? 'active' : ''} onClick={() => setStage(4)}>4 · Layers</button>
-        <button className={stage === 5 ? 'active' : ''} onClick={() => setStage(5)}>5 · 3D / Export</button>
+        <button className={stage === 4 ? 'active' : ''} onClick={() => setStage(4)}>4 · 3D / Export</button>
       </nav>
 
       {busy && <div className="banner busy">{busy}</div>}
       {error && <div className="banner error">{error}</div>}
-      <button className="reset-project" onClick={() => { if (confirm('Reset Island Dreamforge and clear local autosave?')) resetProject(); }}>Reset project</button>
+      <button className="reset-project" onClick={() => { if (confirm('Reset the active profile to defaults? Other profiles are kept.')) resetProject(); }}>Reset active profile</button>
 
       {stage === 1 && (
         <HeightsStudio
@@ -927,6 +1166,14 @@ export default function App() {
           onAnalyzeColors={analyzeColors}
           onPreviewCleanMap={previewCleanMap}
           onGenerateHeightmap={generateHeightmap}
+          flatSectionLayers={layers.filter((l) => l.kind === 'flat')}
+          applyFlatSections={options.applyFlatSections !== false}
+          onApplyFlatSectionsChange={(v) => setOptions((o) => ({ ...o, applyFlatSections: v }))}
+          onAddFlatSection={() => addLayer('flat')}
+          onUpdateFlatSection={updateLayer}
+          onDeleteFlatSection={deleteLayer}
+          onClearFlatSection={clearLayer}
+          onFlatSectionFile={setLayerFile}
         />
       )}
 
@@ -934,7 +1181,9 @@ export default function App() {
         <TexturesStudio
           settings={textureSettings}
           setSettings={setTextureSettings}
-          onOpen3D={() => setStage(5)}
+          maxHeightM={options.maxHeightM}
+          seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0}
+          onOpen3D={() => setStage(4)}
           canPreview={!!finalPreview}
         />
       )}
@@ -942,15 +1191,42 @@ export default function App() {
       {stage === 3 && <section className="water-stage">
         <aside className="panel water-controls">
           <h2>3 · Water</h2>
-          <p className="muted">Preview is shape-agnostic: a disc with a sphere in the middle. Bands show how water will look around any island silhouette.</p>
+          <p className="muted">Ocean look (disc preview) and optional water masks that indent or flatten the baked height map.</p>
           <WaterSettingsPanel
             settings={exportSettings}
             setSettings={setExportSettings}
-            autoOceanRadiusM={getOceanDiscRadiusM(worldSettings, mapSizePx, exportSettings)}
+            worldSettings={worldSettings}
+            mapSizePx={mapSizePx}
+            autoOceanRadiusM={getOceanDiscRadiusM(worldSettings, mapSizePx, { ...exportSettings, oceanRadiusAuto: true })}
           />
           <div className="actions compact">
             <button type="button" className="primary" onClick={() => refreshWaterDiscPreview()}>Refresh preview</button>
           </div>
+          <h3>Water height overlays</h3>
+          <p className="small muted">Paint rivers/lakes on a PNG aligned with your map, then bake into the height map from step 1.</p>
+          <button type="button" onClick={() => addLayer('water')}>+ Water mask</button>
+          <div className="layer-list compact-list">
+            {layers.filter((l) => l.kind === 'water').map((layer) => (
+              <SceneLayerCard
+                key={layer.id}
+                layer={layer}
+                active={activeLayer?.id === layer.id}
+                onSelect={setActiveLayerId}
+                onChange={(patch) => updateLayer(layer.id, patch)}
+                onFile={(file) => setLayerFile(layer.id, file)}
+                onAnalyze={() => analyzeLayer(layer)}
+                onExport={() => exportLayerJson(layer)}
+                onDelete={() => deleteLayer(layer.id)}
+                onClear={() => clearLayer(layer.id)}
+              />
+            ))}
+          </div>
+          {activeLayer?.kind === 'water' && activeLayer?.file && (
+            <div className="actions compact">
+              <button type="button" className="primary" onClick={() => bakeWaterLayer(activeLayer)}>Bake selected water mask</button>
+              <button type="button" onClick={() => { setBakedHeightmap16(''); setBakedPreview(''); setWaterMask(''); }}>Revert water bake</button>
+            </div>
+          )}
         </aside>
         <main className="panel water-preview-panel">
           <h2>Top-down disc</h2>
@@ -963,58 +1239,16 @@ export default function App() {
           ) : (
             <div className="drop-hint big">Open this tab to generate the water disc preview.</div>
           )}
+          <div className="compare layer-compare water-bake-compare">
+            <div><h4>Base height</h4>{heightPreview ? <img src={heightPreview} alt="" /> : <div className="drop-hint">Generate step 1 first</div>}</div>
+            <div><h4>After water bake</h4>{bakedPreview ? <img src={bakedPreview} alt="" /> : <div className="drop-hint">Bake a water mask to preview</div>}</div>
+          </div>
         </main>
       </section>}
 
-      {stage === 4 && <section className="layer-stage">
-        <aside className="panel layer-sidebar">
-          <h2>4 · Overlay layers</h2>
-          <p className="muted">Layers are optional and non-destructive. You can have no water layer at all, add one later, or remove its image with the × on the thumbnail.</p>
-          <div className="tool-grid">
-            <button onClick={() => addLayer('water')}>+ Water</button>
-            <button onClick={() => addLayer('structure')}>+ Structure</button>
-            <button onClick={() => addLayer('marker')}>+ Marker</button>
-            <button onClick={() => addLayer('texture')}>+ Texture</button>
-          </div>
-          <div className="layer-list">
-            {!layers.length && <div className="drop-hint">No overlay layers yet. Add water, structures, markers, or textures when you need them.</div>}
-            {layers.map(layer => <LayerCard
-              key={layer.id}
-              layer={layer}
-              active={activeLayer?.id === layer.id}
-              onSelect={setActiveLayerId}
-              onChange={patch => updateLayer(layer.id, patch)}
-              onFile={file => setLayerFile(layer.id, file)}
-              onAnalyze={() => analyzeLayer(layer)}
-              onExport={() => exportLayerJson(layer)}
-              onDelete={() => deleteLayer(layer.id)}
-              onClear={() => clearLayer(layer.id)}
-            />)}
-          </div>
-        </aside>
-        <main className="panel tall">
-          <h2>Water, structures, markers, and layer preview</h2>
-          <div className="compare layer-compare">
-            <div><h4>Height</h4>{heightPreview ? <img src={heightPreview} /> : <div className="drop-hint">Generate Stage 1 first</div>}</div>
-            <div><h4>Active layer</h4>{activeLayer?.url ? <img src={activeLayer.analysis?.preview || activeLayer.url} /> : <div className="drop-hint">Upload layer image</div>}</div>
-            <div><h4>Baked water</h4>{bakedPreview ? <img src={bakedPreview} /> : <div className="drop-hint">Bake a water layer to preview</div>}</div>
-          </div>
-          {activeLayer?.analysis && <pre className="json-preview">{JSON.stringify({ summary: activeLayer.analysis.summary, firstFeatures: activeLayer.analysis.features?.slice(0, 8) }, null, 2)}</pre>}
-          <div className="actions">
-            {activeLayer?.kind === 'water' && <>
-              <button className="primary" onClick={() => bakeWaterLayer(activeLayer)}>Bake selected water layer</button>
-              <button onClick={() => bakeWaterLayer(activeLayer, 'zip')}>Export Stage 3 ZIP</button>
-              <button onClick={() => { setBakedHeightmap16(''); setBakedPreview(''); setWaterMask(''); }}>Revert water bake</button>
-            </>}
-            <button onClick={() => setStage(5)}>Open 3D viewport</button>
-          </div>
-          <p className="small muted">Ocean colors are tuned in Stage 3 · Water. Sea level is set in Stage 1.</p>
-        </main>
-      </section>}
-
-      {stage === 5 && <section className="stage3">
+      {stage === 4 && <section className="stage3">
         <aside className="panel tools">
-          <h2>5 · Sculpt, paint, view, export</h2>
+          <h2>4 · Sculpt, paint, view, export</h2>
           <div className="icon-toolbar" aria-label="Terrain tools">
             {TOOL_DEFS.map(t => <button key={t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label}: ${t.tip}`} aria-label={t.label}><span>{t.icon}</span><small>{t.label}</small></button>)}
           </div>
@@ -1032,7 +1266,33 @@ export default function App() {
           <button className="primary" onClick={() => viewportRef.current?.autoTexture()}>Regenerate terrain texture</button>
           <button onClick={() => viewportRef.current?.regenerateTrees()}>Regenerate forest clumps</button>
           <button onClick={() => viewportRef.current?.resetCamera()}>Reset camera</button>
-          <p className="small muted">Ocean colors: Stage 3 · Water. Paint applies to land only, not the water plane.</p>
+          <p className="small muted">Ocean colors: step 3 · Water. Paint applies to land only, not the water plane.</p>
+          <h3>Scene overlays</h3>
+          <p className="small muted">Optional PNGs for structures, markers, and texture hints — analyzed for 3D preview and JSON export.</p>
+          <div className="tool-grid">
+            <button type="button" onClick={() => addLayer('structure')}>+ Structure</button>
+            <button type="button" onClick={() => addLayer('marker')}>+ Marker</button>
+            <button type="button" onClick={() => addLayer('texture')}>+ Texture</button>
+          </div>
+          <div className="layer-list compact-list">
+            {layers.filter((l) => l.kind !== 'flat' && l.kind !== 'water').map((layer) => (
+              <SceneLayerCard
+                key={layer.id}
+                layer={layer}
+                active={activeLayer?.id === layer.id}
+                onSelect={setActiveLayerId}
+                onChange={(patch) => updateLayer(layer.id, patch)}
+                onFile={(file) => setLayerFile(layer.id, file)}
+                onAnalyze={() => analyzeLayer(layer)}
+                onExport={() => exportLayerJson(layer)}
+                onDelete={() => deleteLayer(layer.id)}
+                onClear={() => clearLayer(layer.id)}
+              />
+            ))}
+          </div>
+          {activeLayer?.analysis && activeLayer.kind !== 'water' && activeLayer.kind !== 'flat' && (
+            <pre className="json-preview">{JSON.stringify({ summary: activeLayer.analysis.summary, firstFeatures: activeLayer.analysis.features?.slice(0, 6) }, null, 2)}</pre>
+          )}
           <h3>Exports</h3>
           <div className="tool-grid">
             <button onClick={() => exportMesh('glb')}>GLB</button>
@@ -1055,7 +1315,7 @@ export default function App() {
           />
         </aside>
         <div className="viewer-wrap">
-          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
+          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} foamMaskUrl={derivedMaps?.foamMask || ''} waterMaskUrl={derivedMaps?.waterMask || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} bandsPlaneWidthM={derivedMaps?.bandsPlaneWidthM} bandsPlaneDepthM={derivedMaps?.bandsPlaneDepthM} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
         </div>
       </section>}
     </div>

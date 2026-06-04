@@ -153,9 +153,14 @@ export default function HeightProfileChart({
   );
 
   // All tuning options that affect the smooth computation.
+  const sampleSmoothKey = useMemo(
+    () => samples.map((s) => `${s.hex}:${s.smoothness ?? ''}`).join('|'),
+    [samples],
+  );
+
   const tuneOpts = useMemo(
-    () => ({ ...options, similarRadius }),
-    [options, similarRadius],
+    () => ({ ...options, similarRadius, samples }),
+    [options, similarRadius, samples],
   );
 
   // ── Smooth (debounced) ──────────────────────────────────────────────────
@@ -223,7 +228,7 @@ export default function HeightProfileChart({
     if (!baseRef.current) return;
     applySamplesToBase(baseRef.current, samples, matchOpts);
     scheduleSmooth();
-  }, [sampleHeightKey, matchOpts, samples, scheduleSmooth]);
+  }, [sampleHeightKey, sampleSmoothKey, matchOpts, samples, scheduleSmooth]);
 
   const scaleProfilePoints = useCallback(
     (pts) => pts.map((p) => ({ ...p, meters: p.meters * elevationScale })),

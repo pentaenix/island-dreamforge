@@ -16,6 +16,8 @@ class HeightSample:
     tolerance: float = 35.0
     weight: float = 1.0
     label: str = ""
+    """0–1 scale for band smoothing; None = use global sliders at full strength."""
+    smoothness: float | None = None
 
 
 def parse_samples(raw_samples: List[Dict[str, Any]]) -> List[HeightSample]:
@@ -23,6 +25,7 @@ def parse_samples(raw_samples: List[Dict[str, Any]]) -> List[HeightSample]:
     for item in raw_samples:
         if "hex" not in item or "height" not in item:
             continue
+        smooth = item.get("smoothness")
         samples.append(
             HeightSample(
                 hex=str(item["hex"]),
@@ -30,6 +33,7 @@ def parse_samples(raw_samples: List[Dict[str, Any]]) -> List[HeightSample]:
                 tolerance=float(item.get("tolerance", 35)),
                 weight=float(item.get("weight", 1.0)),
                 label=str(item.get("label", "")),
+                smoothness=None if smooth is None else float(np.clip(smooth, 0.0, 1.0)),
             )
         )
     if not samples:
@@ -392,11 +396,203 @@ def _soft_mask_from_dilation(mask: np.ndarray, radius_px: int) -> np.ndarray:
 
 
 
+def _combine_flat_masks(masks: List[np.ndarray]) -> np.ndarray | None:
+    if not masks:
+        return None
+    shape = masks[0].shape
+    combined = np.zeros(shape, dtype=bool)
+    for mask in masks:
+        if mask.shape != shape:
+            raise ValueError("All flat section masks must match the map size")
+        combined |= mask.astype(bool)
+    return combined if np.any(combined) else None
+
+
+def _label_connected_components(mask: np.ndarray) -> np.ndarray:
+    h, w = mask.shape
+    labels = np.zeros((h, w), dtype=np.int32)
+    current = 0
+    for r in range(h):
+        for c in range(w):
+            if not mask[r, c] or labels[r, c]:
+                continue
+            current += 1
+            stack = [(r, c)]
+            labels[r, c] = current
+            while stack:
+                rr, cc = stack.pop()
+                for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    nr, nc = rr + dr, cc + dc
+                    if 0 <= nr < h and 0 <= nc < w and mask[nr, nc] and labels[nr, nc] == 0:
+                        labels[nr, nc] = current
+                        stack.append((nr, nc))
+    return labels
+
+
+def _build_frozen_flat_heights(
+    raw: np.ndarray,
+    mask: np.ndarray,
+    *,
+    sea_level_m: float,
+    height_mode: str = "median",
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Plateau heights from the color-map field only (before band smoothing)."""
+    frozen = raw.astype(np.float32).copy()
+    mask = mask.astype(bool)
+    effective = mask & (raw > sea_level_m + 0.12)
+    skipped_water = int(np.count_nonzero(mask & ~effective))
+    if not np.any(effective):
+        return frozen, {
+            "changedPixels": 0,
+            "skippedWaterPixels": skipped_water,
+            "regions": 0,
+            "note": "Flat mask had no land pixels above sea level.",
+        }
+
+    labels = _label_connected_components(effective)
+    mode = str(height_mode or "median").lower()
+    regions: List[Dict[str, Any]] = []
+    for label_id in range(1, int(labels.max()) + 1):
+        region = labels == label_id
+        vals = raw[region]
+        level = float(np.mean(vals)) if mode == "mean" else float(np.median(vals))
+        frozen[region] = level
+        regions.append({"region": label_id, "targetHeightM": round(level, 4), "pixels": int(np.count_nonzero(region))})
+
+    return frozen, {
+        "changedPixels": int(np.count_nonzero(effective)),
+        "skippedWaterPixels": skipped_water,
+        "regions": len(regions),
+        "heightMode": mode,
+        "regionTargets": regions[:32],
+    }
+
+
+def _prepare_flat_protection(
+    raw: np.ndarray,
+    flat_masks: List[np.ndarray] | None,
+    flat_layer_options: List[Dict[str, Any]] | None,
+    options: Dict[str, Any],
+) -> Dict[str, Any] | None:
+    combined = _combine_flat_masks(flat_masks or [])
+    if combined is None:
+        return None
+    sea_level = float(options.get("seaLevelM", 0.0) or 0.0)
+    opts_list = flat_layer_options or []
+    height_mode = "median"
+    edge_soft_px = 0
+    strength_map = np.zeros(raw.shape, dtype=np.float32)
+    for i, mask in enumerate(flat_masks or []):
+        per = opts_list[i] if i < len(opts_list) else {}
+        if i == 0:
+            height_mode = str(per.get("heightMode", "median") or "median")
+        edge_soft_px = max(edge_soft_px, int(per.get("edgeSoftPx", 0) or 0))
+        strength = float(per.get("flattenStrength", per.get("flatStrength", 0.72)) or 0.72)
+        strength = float(np.clip(strength, 0.0, 1.0))
+        m = mask.astype(bool)
+        strength_map[m] = np.maximum(strength_map[m], strength)
+    frozen, meta = _build_frozen_flat_heights(
+        raw, combined, sea_level_m=sea_level, height_mode=height_mode,
+    )
+    meta["flattenStrengthMax"] = round(float(strength_map.max()), 4) if np.any(combined) else 0.0
+    return {
+        "mask": combined,
+        "effective": combined & (raw > sea_level + 0.12),
+        "frozen": frozen,
+        "edgeSoftPx": edge_soft_px,
+        "strengthMap": strength_map,
+        "meta": meta,
+    }
+
+
+def _blend_flat_protection(
+    height: np.ndarray,
+    frozen: np.ndarray,
+    full_mask: np.ndarray,
+    strength_map: np.ndarray | None,
+    default_strength: float = 1.0,
+) -> np.ndarray:
+    """Pull terrain toward plateau/raw frozen heights without forcing a hard plane."""
+    out = height.astype(np.float32).copy()
+    if not np.any(full_mask):
+        return out
+    if strength_map is not None:
+        s = np.clip(strength_map[full_mask], 0.0, 1.0)
+        out[full_mask] = out[full_mask] * (1.0 - s) + frozen[full_mask] * s
+    else:
+        s = float(np.clip(default_strength, 0.0, 1.0))
+        out[full_mask] = out[full_mask] * (1.0 - s) + frozen[full_mask] * s
+    return out
+
+
+def _sample_smoothness_scale(sample: HeightSample) -> float:
+    raw = sample.smoothness
+    if raw is None:
+        return 1.0
+    return float(np.clip(raw, 0.0, 1.0))
+
+
+def _designed_band_blend_height(
+    raw: np.ndarray,
+    label_map: np.ndarray,
+    samples: List[HeightSample],
+    options: Dict[str, Any],
+    flat_protection: Dict[str, Any] | None,
+) -> np.ndarray:
+    """Blend color-band heights toward smoothed ramps; per-sample smoothness scales the effect."""
+    global_blend = float(options.get("bandBlendStrength", 0.82) or 0.0)
+    global_sigma = float(options.get("bandTransitionPx", 10.0) or 0.0)
+    passes = int(options.get("bandBlendPasses", 1) or 1)
+    if global_blend <= 0 or global_sigma <= 0:
+        return _restore_flat_protection(raw.astype(np.float32).copy(), flat_protection)
+
+    height = raw.astype(np.float32).copy()
+    for pass_i in range(max(1, passes)):
+        sigma = max(1.0, global_sigma * (0.55 ** pass_i) if pass_i else global_sigma)
+        blend_scale = global_blend * (0.35 if pass_i else 1.0)
+        broad = _gaussian_filter(height, sigma=sigma)
+        for idx, sample in enumerate(samples):
+            mask = label_map == idx
+            if not np.any(mask):
+                continue
+            blend = blend_scale * _sample_smoothness_scale(sample)
+            if blend <= 0:
+                continue
+            height[mask] = height[mask] * (1.0 - blend) + broad[mask] * blend
+        height = _restore_flat_protection(height, flat_protection)
+    return height
+
+
+def _restore_flat_protection(height: np.ndarray, protection: Dict[str, Any] | None) -> np.ndarray:
+    if not protection:
+        return height
+    frozen = protection["frozen"]
+    full_mask = protection.get("mask", protection["effective"]).astype(bool)
+    edge_soft_px = int(protection.get("edgeSoftPx", 0) or 0)
+    strength_map = protection.get("strengthMap")
+    height = height.astype(np.float32)
+    out = _blend_flat_protection(height, frozen, full_mask, strength_map)
+    if edge_soft_px <= 0:
+        return out
+    # Feather outward from the mask border; taper blend by local flatten strength.
+    outer_influence = np.clip(_soft_mask_from_dilation(full_mask, edge_soft_px), 0.0, 1.0).astype(np.float32)
+    transition = (~full_mask) & (outer_influence > 0.01)
+    if np.any(transition):
+        t = outer_influence[transition]
+        if strength_map is not None:
+            edge_strength = np.clip(strength_map[transition], 0.0, 1.0)
+            t = t * edge_strength
+        out[transition] = height[transition] * (1.0 - t) + frozen[transition] * t
+    return out
+
+
 def _initial_designed_band_height(
     image: Image.Image,
     samples: List[HeightSample],
     max_height_m: float,
     options: Dict[str, Any],
+    flat_masks: List[np.ndarray] | None = None,
+    flat_layer_options: List[Dict[str, Any]] | None = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Create a terrain base from clean handmade color bands.
 
@@ -465,28 +661,29 @@ def _initial_designed_band_height(
 
     # Pixel-perfect colors often include tiny accidental dots. This guard turns tiny color islands into
     # nearby terrain before smoothing so they do not become spike needles.
-    if bool(options.get("cleanTinyRegions", True)):
+    flat_protection = _prepare_flat_protection(raw, flat_masks, flat_layer_options, options)
+
+    if bool(options.get("cleanTinyRegions", True)) and flat_protection is None:
         passes = int(options.get("tinyRegionPasses", 2) or 2)
         raw = _despike_height(raw, threshold_m=float(options.get("tinyRegionHeightDeltaM", 18.0) or 18.0), strength=0.85, passes=passes)
+        flat_protection = _prepare_flat_protection(raw, flat_masks, flat_layer_options, options)
 
     band_blend = float(options.get("bandBlendStrength", 0.82) or 0.0)
     band_sigma = float(options.get("bandTransitionPx", 10.0) or 0.0)
     if band_blend > 0 and band_sigma > 0:
-        # Smooth the color bands into continuous terrain. The distance/width of painted bands controls the incline.
-        broad = _gaussian_filter(raw, sigma=band_sigma)
-        height = raw * (1.0 - band_blend) + broad * band_blend
-        passes = int(options.get("bandBlendPasses", 1) or 1)
-        for _ in range(max(0, passes - 1)):
-            height = height * (1.0 - band_blend * 0.35) + _gaussian_filter(height, sigma=max(1.0, band_sigma * 0.55)) * (band_blend * 0.35)
+        height = _designed_band_blend_height(raw, label_map, samples, options, flat_protection)
     else:
-        height = raw.copy()
+        height = _restore_flat_protection(raw.copy(), flat_protection)
 
-    # Keep water as a flat control plane by default; it can still get beaches from later water/coast tools.
+    # Keep water as a flat control plane; do not force sea level through protected flat mesas.
     if bool(options.get("protectWaterLevel", True)):
         water_sample_mask = np.zeros((h, w), dtype=bool)
         for idx, sample in enumerate(samples):
             if sample.height <= sea_level + float(options.get("waterHeightToleranceM", 0.5) or 0.5):
                 water_sample_mask |= label_map == idx
+        if flat_protection is not None:
+            # Do not flatten masked mesas to sea level; water-colored pixels inside the mask keep raw heights.
+            water_sample_mask &= ~flat_protection["mask"]
         height[water_sample_mask] = sea_level
 
     metadata = {
@@ -495,6 +692,8 @@ def _initial_designed_band_height(
         "exactColorMode": exact_mode,
         "bandBlendStrength": band_blend,
         "bandTransitionPx": band_sigma,
+        "flatProtection": flat_protection["meta"] if flat_protection else None,
+        "flatProtectionBundle": flat_protection,
     }
     return np.clip(height, 0.0, float(max_height_m)).astype(np.float32), metadata
 
@@ -503,18 +702,22 @@ def generate_heightmap_from_colors(
     samples: List[HeightSample],
     max_height_m: float,
     options: Dict[str, Any] | None = None,
+    flat_masks: List[np.ndarray] | None = None,
+    flat_layer_options: List[Dict[str, Any]] | None = None,
 ) -> np.ndarray:
     """Generate a meter heightmap by interpolating picked map colors.
 
-    Method:
-    - Assign each pixel a nearest/weighted color height in RGB space.
-    - Pixels inside tolerance are strongly locked to matching sample height.
-    - Pixels outside all tolerances use inverse-distance interpolation, preventing holes.
-    - Optional smoothing, peak rounding, cliff-strength detail, and terrace bands are applied afterward.
+    Flat-section masks (optional) are applied between the raw color-map heights and smoothing:
+    each masked region becomes a level plateau at the height its colors already imply, then
+    band blending and other filters run only outside those interiors (with optional edge feather).
     """
     options = options or {}
+    flat_bundle: Dict[str, Any] | None = None
     if bool(options.get("designedBandMode", True)):
-        height, _band_meta = _initial_designed_band_height(image, samples, max_height_m, options)
+        height, band_meta = _initial_designed_band_height(
+            image, samples, max_height_m, options, flat_masks, flat_layer_options,
+        )
+        flat_bundle = band_meta.get("flatProtectionBundle")
     else:
         clean_image = preprocess_map_for_height(image, samples, options)
         rgb = pil_to_rgb_array(clean_image)
@@ -551,19 +754,24 @@ def generate_heightmap_from_colors(
 
         height = height_flat.reshape((h, w)).astype(np.float32)
         height = np.clip(height, 0.0, float(max_height_m))
+        flat_bundle = _prepare_flat_protection(height, flat_masks, flat_layer_options, options)
+        height = _restore_flat_protection(height, flat_bundle)
+
+    def _guard(h: np.ndarray) -> np.ndarray:
+        return _restore_flat_protection(h, flat_bundle)
 
     terrace_count = int(options.get("terraceCount", 0) or 0)
     terrace_strength = float(options.get("terraceStrength", 0.0) or 0.0)
     if terrace_count > 1 and terrace_strength > 0:
         step = float(max_height_m) / float(terrace_count - 1)
         terraced = np.round(height / step) * step
-        height = height * (1.0 - terrace_strength) + terraced * terrace_strength
+        height = _guard(height * (1.0 - terrace_strength) + terraced * terrace_strength)
 
     sigma = float(options.get("smoothingSigma", 1.5) or 0.0)
     if sigma > 0:
         smoothed = _gaussian_filter(height, sigma=sigma)
         preserve = float(options.get("detailPreserve", 0.25) or 0.0)
-        height = smoothed * (1.0 - preserve) + height * preserve
+        height = _guard(smoothed * (1.0 - preserve) + height * preserve)
 
     round_strength = float(options.get("roundPeaks", 0.45) or 0.0)
     if round_strength > 0:
@@ -571,42 +779,45 @@ def generate_heightmap_from_colors(
         cap_mask = np.clip((height - threshold) / max(1e-3, float(max_height_m) - threshold), 0.0, 1.0)
         cap_mask = _gaussian_filter(cap_mask, sigma=max(1.0, sigma * 2.0 + 1.0))
         broad = _gaussian_filter(height, sigma=float(options.get("roundPeakRadius", 7.0)))
-        height = height * (1.0 - cap_mask * round_strength) + broad * (cap_mask * round_strength)
+        height = _guard(height * (1.0 - cap_mask * round_strength) + broad * (cap_mask * round_strength))
         height = np.minimum(height, float(max_height_m))
 
     cliff_strength = float(options.get("cliffStrength", 0.0) or 0.0)
     if cliff_strength > 0:
         low = _gaussian_filter(height, sigma=float(options.get("cliffRadius", 5.0)))
         detail = height - low
-        height = low + detail * (1.0 + cliff_strength)
-        height = _gaussian_filter(height, sigma=float(options.get("postCliffSmooth", 0.6)))
+        height = _guard(low + detail * (1.0 + cliff_strength))
+        height = _guard(_gaussian_filter(height, sigma=float(options.get("postCliffSmooth", 0.6))))
 
     curve_strength = float(options.get("curveSmoothStrength", 0.28) or 0.0)
     if curve_strength > 0:
         curve_radius = float(options.get("curveSmoothRadius", max(2.0, sigma * 2.5 + 1.0)) or 4.0)
         broad_curve = _gaussian_filter(height, sigma=curve_radius)
-        height = height * (1.0 - curve_strength) + broad_curve * curve_strength
+        height = _guard(height * (1.0 - curve_strength) + broad_curve * curve_strength)
 
     spike_strength = float(options.get("spikeRemovalStrength", 0.70) or 0.0)
-    if spike_strength > 0:
+    if spike_strength > 0 and flat_bundle is None:
         height = _despike_height(
             height,
             threshold_m=float(options.get("spikeThresholdM", 32.0) or 32.0),
             strength=spike_strength,
             passes=int(options.get("spikeRemovalPasses", 3) or 3),
         )
+        height = _guard(height)
 
     slope_strength = float(options.get("slopeLimitStrength", 0.45) or 0.0)
     if slope_strength > 0:
-        height = _slope_limit_height(
-            height,
-            max_delta_m=float(options.get("slopeLimitMPerPx", 75.0) or 75.0),
-            strength=slope_strength,
-            iterations=int(options.get("slopeLimitIterations", 2) or 2),
+        height = _guard(
+            _slope_limit_height(
+                height,
+                max_delta_m=float(options.get("slopeLimitMPerPx", 75.0) or 75.0),
+                strength=slope_strength,
+                iterations=int(options.get("slopeLimitIterations", 2) or 2),
+            )
         )
 
     height = np.nan_to_num(height, nan=0.0, posinf=float(max_height_m), neginf=0.0)
-    return np.clip(height, 0.0, float(max_height_m)).astype(np.float32)
+    return _guard(np.clip(height, 0.0, float(max_height_m)).astype(np.float32))
 
 
 def flatten_beaches_from_island_mask(height: np.ndarray, island_mask: np.ndarray, max_beach_height: float = 12.0, width_px: int = 18) -> np.ndarray:
@@ -620,6 +831,50 @@ def flatten_beaches_from_island_mask(height: np.ndarray, island_mask: np.ndarray
     beach_weight = _soft_mask_from_dilation(coast, width_px) * island.astype(np.float32)
     beach_target = np.minimum(height, max_beach_height)
     return height * (1.0 - beach_weight) + beach_target * beach_weight
+
+
+def apply_flat_section_mask(
+    raw: np.ndarray,
+    mask: np.ndarray,
+    *,
+    max_height_m: float,
+    edge_soft_px: int = 0,
+    height_mode: str = "median",
+    sea_level_m: float = 0.0,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Build plateau heights from raw color-map field (legacy helper / tests)."""
+    frozen, meta = _build_frozen_flat_heights(
+        raw, mask, sea_level_m=sea_level_m, height_mode=height_mode,
+    )
+    protection = {
+        "mask": mask.astype(bool),
+        "frozen": frozen,
+        "effective": mask.astype(bool) & (raw > sea_level_m + 0.12),
+        "edgeSoftPx": edge_soft_px,
+        "strengthMap": np.full(raw.shape, 1.0, dtype=np.float32),
+        "meta": meta,
+    }
+    baked = _restore_flat_protection(raw, protection)
+    baked = np.clip(baked, 0.0, float(max_height_m)).astype(np.float32)
+    meta["modifiedTerrain"] = bool(meta.get("changedPixels", 0) > 0)
+    return baked, meta
+
+
+def apply_flat_section_layers(
+    raw: np.ndarray,
+    layer_masks: List[np.ndarray],
+    *,
+    max_height_m: float,
+    layer_options: List[Dict[str, Any]] | None = None,
+    sea_level_m: float = 0.0,
+) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+    """Legacy: build flat plateaus from raw heights before smoothing."""
+    opts = {"seaLevelM": sea_level_m}
+    protection = _prepare_flat_protection(raw, layer_masks, layer_options, opts)
+    baked = _restore_flat_protection(raw, protection)
+    baked = np.clip(baked, 0.0, float(max_height_m)).astype(np.float32)
+    meta_list = [protection["meta"]] if protection else []
+    return baked, meta_list
 
 
 def bake_water_layer(

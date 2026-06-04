@@ -5,6 +5,8 @@ export const DEFAULT_TEXTURE_SETTINGS = {
   pixelSize: 3,
   fuzziness: 0.16,
   normalStrength: 0.72,
+  /** Fake canopy relief in the normal map (no extra geometry). */
+  foliageNormalStrength: 0.78,
   materialContrast: 0.42,
   variation: 0.18,
   tilingM: 36,

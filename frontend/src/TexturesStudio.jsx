@@ -3,8 +3,16 @@ import { Slider } from './studioUi.jsx';
 import TextureSwatchPreview from './TextureSwatchPreview.jsx';
 import { MATERIALS } from './TerrainViewport.jsx';
 
-export default function TexturesStudio({ settings, setSettings, onOpen3D, canPreview }) {
+export default function TexturesStudio({
+  settings,
+  setSettings,
+  onOpen3D,
+  canPreview,
+  maxHeightM = 500,
+  seaLevelM = 0,
+}) {
   const patch = (next) => setSettings((prev) => ({ ...prev, ...next }));
+  const sandCap = Math.max(8, Math.round(Number(maxHeightM || 500) * 0.35));
 
   return (
     <section className="texture-stage">
@@ -31,6 +39,24 @@ export default function TexturesStudio({ settings, setSettings, onOpen3D, canPre
           <Slider label="Color variation" value={settings.variation ?? 0.18} min={0} max={1} step={0.01} onChange={(v) => patch({ variation: v })} />
           <Slider label="Material contrast" value={settings.materialContrast ?? 0.42} min={0} max={1} step={0.01} onChange={(v) => patch({ materialContrast: v })} />
           <Slider label="Normal strength" value={settings.normalStrength ?? 0.72} min={0} max={1.4} step={0.01} onChange={(v) => patch({ normalStrength: v })} />
+          <Slider label="Foliage normal relief" value={settings.foliageNormalStrength ?? 0.78} min={0} max={1.4} step={0.01} onChange={(v) => patch({ foliageNormalStrength: v })} />
+        </details>
+
+        <details open>
+          <summary>Shore &amp; sand (preview + 3D)</summary>
+          <p className="small muted">
+            Beach sand applies from sea level ({seaLevelM} m) up to the height below. The demo mount and full island use the same rule.
+          </p>
+          <Slider
+            label="Sand up to height"
+            value={settings.sandHeightM ?? 14}
+            min={1}
+            max={sandCap}
+            step={1}
+            suffix="m"
+            onChange={(v) => patch({ sandHeightM: v })}
+          />
+          <Slider label="Wet sand strip width" value={settings.wetSandWidthM ?? 5} min={0} max={40} step={1} suffix="m" onChange={(v) => patch({ wetSandWidthM: v })} />
         </details>
 
         <details>
@@ -38,8 +64,6 @@ export default function TexturesStudio({ settings, setSettings, onOpen3D, canPre
           <Slider label="Rock from slope" value={settings.rockSlopeStart ?? 68} min={8} max={85} step={1} suffix="°" onChange={(v) => patch({ rockSlopeStart: v })} />
           <Slider label="Rock blend" value={settings.rockSlopeBlend ?? 14} min={2} max={40} step={1} suffix="°" onChange={(v) => patch({ rockSlopeBlend: v })} />
           <Slider label="Rock detail" value={settings.rockFeatureScale ?? 0.55} min={0} max={1.4} step={0.01} onChange={(v) => patch({ rockFeatureScale: v })} />
-          <Slider label="Sand band height" value={settings.sandHeightM ?? 14} min={1} max={80} step={1} suffix="m" onChange={(v) => patch({ sandHeightM: v })} />
-          <Slider label="Wet sand width" value={settings.wetSandWidthM ?? 5} min={0} max={40} step={1} suffix="m" onChange={(v) => patch({ wetSandWidthM: v })} />
           <Slider label="Gravel on slopes" value={settings.gravelAmount ?? 0.12} min={0} max={1} step={0.01} onChange={(v) => patch({ gravelAmount: v })} />
         </details>
 
@@ -94,7 +118,7 @@ export default function TexturesStudio({ settings, setSettings, onOpen3D, canPre
 
       <main className="panel texture-preview-panel">
         <h2>Demo mount · 3D texture preview</h2>
-        <TextureSwatchPreview settings={settings} />
+        <TextureSwatchPreview settings={settings} maxHeightM={maxHeightM} seaLevelM={seaLevelM} />
       </main>
     </section>
   );

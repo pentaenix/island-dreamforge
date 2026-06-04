@@ -27,21 +27,33 @@ function colorDistance(rgb, hex) {
   return Math.sqrt((rgb[0] - s[0]) ** 2 + (rgb[1] - s[1]) ** 2 + (rgb[2] - s[2]) ** 2);
 }
 
-function nearestSampleHeight(rgb, samples, exact, radius) {
-  if (!samples?.length) return 0;
+function nearestSampleMatch(rgb, samples, exact, radius) {
+  if (!samples?.length) return { height: 0, index: 0 };
+  let bestIdx = 0;
   let best = samples[0];
   let bestD = Infinity;
-  for (const s of samples) {
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
     const d = colorDistance(rgb, s.hex);
     if (d < bestD) {
       bestD = d;
       best = s;
+      bestIdx = i;
     }
-    if (exact && d < 1.5) return Number(s.height) || 0;
+    if (exact && d < 1.5) return { height: Number(s.height) || 0, index: i };
   }
-  if (exact) return Number(best.height) || 0;
-  if (bestD > radius) return Number(samples[0].height) || 0;
-  return Number(best.height) || 0;
+  if (exact) return { height: Number(best.height) || 0, index: bestIdx };
+  if (bestD > radius) return { height: Number(samples[0].height) || 0, index: 0 };
+  return { height: Number(best.height) || 0, index: bestIdx };
+}
+
+function nearestSampleHeight(rgb, samples, exact, radius) {
+  return nearestSampleMatch(rgb, samples, exact, radius).height;
+}
+
+export function sampleSmoothnessScale(sample) {
+  if (sample?.smoothness == null || sample?.smoothness === '') return 1;
+  return Math.max(0, Math.min(1, Number(sample.smoothness)));
 }
 
 function boxBlurPass(heights, rows, cols, radius) {
@@ -130,15 +142,19 @@ export async function buildDraftBaseField(mapUrl, samples, opts = {}) {
   const data = ctx.getImageData(0, 0, cols, rows).data;
   const pixels = new Uint8Array(rows * cols * 3);
   const baseMeters = new Float32Array(rows * cols);
+  const labels = new Uint16Array(rows * cols);
   for (let i = 0; i < baseMeters.length; i++) {
     pixels[i * 3] = data[i * 4];
     pixels[i * 3 + 1] = data[i * 4 + 1];
     pixels[i * 3 + 2] = data[i * 4 + 2];
     const rgb = [pixels[i * 3], pixels[i * 3 + 1], pixels[i * 3 + 2]];
-    baseMeters[i] = nearestSampleHeight(rgb, samples, exact, radius);
+    const match = nearestSampleMatch(rgb, samples, exact, radius);
+    baseMeters[i] = match.height;
+    labels[i] = match.index;
   }
   const base = {
     baseMeters,
+    labels,
     pixels,
     rows,
     cols,
@@ -158,7 +174,8 @@ export async function buildDraftBaseField(mapUrl, samples, opts = {}) {
  */
 export function smoothDraftField(base, opts = {}) {
   if (!base?.baseMeters) return null;
-  const { baseMeters, rows, cols } = base;
+  const { baseMeters, rows, cols, labels } = base;
+  const samples = opts.samples || [];
   const ceilingM = Math.max(1, Number(opts.maxHeightM || 500));
   const raw = Float32Array.from(baseMeters);
   let meters = raw;
@@ -168,7 +185,22 @@ export function smoothDraftField(base, opts = {}) {
   const sigma = Math.max(0, Number(opts.bandTransitionPx ?? 11)) * pxScale;
   const passes = Math.max(1, Number(opts.bandBlendPasses ?? 2));
 
-  if (blend > 0 && sigma > 0) {
+  if (blend > 0 && sigma > 0 && labels?.length && samples.length) {
+    for (let p = 0; p < passes; p++) {
+      const passSigma = Math.max(1, p ? sigma * 0.55 : sigma);
+      const blendScale = p ? blend * 0.35 : blend;
+      const broad = gaussianBlurApprox(meters, rows, cols, passSigma);
+      for (let si = 0; si < samples.length; si++) {
+        const sm = sampleSmoothnessScale(samples[si]);
+        const b = blendScale * sm;
+        if (b <= 0) continue;
+        for (let i = 0; i < meters.length; i++) {
+          if (labels[i] !== si) continue;
+          meters[i] = meters[i] * (1 - b) + broad[i] * b;
+        }
+      }
+    }
+  } else if (blend > 0 && sigma > 0) {
     let broad = gaussianBlurApprox(raw, rows, cols, sigma);
     meters = blendFields(raw, broad, blend);
     for (let p = 1; p < passes; p++) {

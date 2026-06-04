@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 
+/** Flat mask preview on the base map (80% visible overlay). */
+export const FLAT_MASK_MAP_OPACITY = 0.8;
+
 function hexFromRgb(r, g, b) {
   return '#' + [r, g, b].map((v) => Number(v).toString(16).padStart(2, '0')).join('');
 }
@@ -13,6 +16,7 @@ function rgbFromHex(hex) {
 export default function MapPicker({
   imageUrl,
   overlayUrl,
+  flatMaskOverlays = [],
   picked,
   pixelPerfect,
   showMatch,
@@ -23,6 +27,7 @@ export default function MapPicker({
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
   const sourceDataRef = useRef(null);
+  const flatOverlayImagesRef = useRef([]);
   const [loadState, setLoadState] = useState({ loading: false, error: '', width: 0, height: 0 });
 
   useEffect(() => {
@@ -60,7 +65,52 @@ export default function MapPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageUrl, mapVersion]);
 
-  useEffect(() => { draw(); }, [picked, pixelPerfect, showMatch, similarRadius, overlayUrl, loadState.width, loadState.height]);
+  useEffect(() => {
+    const layers = (flatMaskOverlays || []).filter((l) => l?.url);
+    if (!layers.length) {
+      flatOverlayImagesRef.current = [];
+      draw();
+      return undefined;
+    }
+    let cancelled = false;
+    Promise.all(
+      layers.map(
+        (layer) => new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve({ img, opacity: layer.opacity ?? FLAT_MASK_MAP_OPACITY });
+          img.onerror = reject;
+          img.src = layer.url;
+        }),
+      ),
+    )
+      .then((loaded) => {
+        if (!cancelled) {
+          flatOverlayImagesRef.current = loaded;
+          draw();
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          flatOverlayImagesRef.current = [];
+          draw();
+        }
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flatMaskOverlays, loadState.width, loadState.height]);
+
+  useEffect(() => {
+    draw();
+  }, [picked, pixelPerfect, showMatch, similarRadius, overlayUrl, loadState.width, loadState.height]);
+
+  function drawFlatMaskOverlays(ctx, canvas) {
+    for (const { img, opacity } of flatOverlayImagesRef.current) {
+      ctx.save();
+      ctx.globalAlpha = opacity ?? FLAT_MASK_MAP_OPACITY;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+  }
 
   function draw() {
     const canvas = canvasRef.current;
@@ -98,6 +148,8 @@ export default function MapPicker({
       ctx.restore();
     }
 
+    drawFlatMaskOverlays(ctx, canvas);
+
     if (overlayUrl) {
       const o = new Image();
       o.onload = () => {
@@ -121,6 +173,8 @@ export default function MapPicker({
     onPick(hexFromRgb(src.data[idx], src.data[idx + 1], src.data[idx + 2]), { x, y, width: canvas.width, height: canvas.height });
   }
 
+  const flatOverlayCount = (flatMaskOverlays || []).filter((l) => l?.url).length;
+
   if (!imageUrl) {
     return <div className="drop-hint">Upload your handmade map or load the included island example.</div>;
   }
@@ -128,6 +182,11 @@ export default function MapPicker({
     <div className="map-picker">
       {loadState.loading && <div className="map-status">Loading map…</div>}
       {showMatch && <div className="map-status match">Matching preview is ON — cyan tint shows the selected color</div>}
+      {flatOverlayCount > 0 && (
+        <div className="map-status flat-mask">
+          Flat mask overlay on ({Math.round(FLAT_MASK_MAP_OPACITY * 100)}% visible) — {flatOverlayCount} layer{flatOverlayCount > 1 ? 's' : ''}
+        </div>
+      )}
       {loadState.error && <div className="banner error">{loadState.error}</div>}
       <canvas
         className="map-canvas pixel"

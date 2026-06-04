@@ -45,6 +45,16 @@ export function getDerivedDepthM(worldSettings, mapSizePx = {}) {
   return Number(w.depthM || 1086);
 }
 
+/** Terrain + water band plane footprint (m) — must match TerrainViewport getWorldDims. */
+export function getWorldDimsM(rows, cols, worldSettings = {}) {
+  const width = Math.max(50, Number(worldSettings?.widthM || 1480));
+  const depth = Math.max(
+    50,
+    Number(worldSettings?.depthM || getDerivedDepthM(worldSettings, { width: cols, height: rows })),
+  );
+  return { width, depth };
+}
+
 /** Horizontal scale vs resort default — also applied to terrain elevation in world meters. */
 export function getIslandHorizonScale(worldSettings) {
   const w = Number(worldSettings?.widthM ?? REFERENCE_ISLAND_WIDTH_M);
@@ -68,15 +78,128 @@ export function getWorldMaxHeightM(maxHeightM, worldSettings) {
   return Math.max(1, Number(maxHeightM || 500)) * getIslandHorizonScale(worldSettings);
 }
 
-export function getOceanDiscRadiusM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
+/** Max disc diameter slider (m) — preview frame uses this so the disc can grow visibly. */
+export const WATER_DISC_SLIDER_MAX_DIAMETER_M = 48000;
+
+/**
+ * World span for the Water-tab disc preview — frames the current disc with padding
+ * (not the full 48 km slider max, or the disc looks like a speck on black).
+ */
+export function getWaterDiscPreviewSpanM(worldSettings, mapSizePx = {}, oceanRadiusM = null) {
+  const footprintD = getOceanFootprintRadiusM(worldSettings, mapSizePx) * 2;
+  const r = Number(oceanRadiusM);
+  const discD = Number.isFinite(r) && r > 0 ? r * 2 : footprintD;
+  const framed = discD * 1.24;
+  return Math.min(WATER_DISC_SLIDER_MAX_DIAMETER_M, Math.max(framed, 520));
+}
+
+/** Furthest distance from map center to a corner (m) — auto disc won't exceed this. */
+export function getOceanFootprintRadiusM(worldSettings, mapSizePx = {}) {
   const width = Number(worldSettings?.widthM ?? DEFAULT_WORLD_SETTINGS.widthM);
   const depth = getDerivedDepthM(worldSettings, mapSizePx);
-  const span = Math.max(width, depth);
+  return Math.hypot(width * 0.5, depth * 0.5);
+}
+
+export function getAutoOceanDiscRadiusM(worldSettings, mapSizePx = {}) {
+  const span = Math.max(
+    Number(worldSettings?.widthM ?? DEFAULT_WORLD_SETTINGS.widthM),
+    getDerivedDepthM(worldSettings, mapSizePx),
+  );
   const autoRadius = Math.max(400, span * OCEAN_DISC_RADIUS_RATIO);
-  if (oceanSettings?.oceanRadiusAuto === false) {
-    return Math.max(50, Number(oceanSettings.oceanRadiusM) || autoRadius);
+  return Math.min(autoRadius, getOceanFootprintRadiusM(worldSettings, mapSizePx));
+}
+
+/**
+ * 3D ocean disc radius (m) — visual circle only; not used for band map generation.
+ */
+export function getOceanDiscRadiusM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
+  if (oceanSettings?.oceanRadiusAuto !== false) {
+    return getAutoOceanDiscRadiusM(worldSettings, mapSizePx);
   }
-  return autoRadius;
+  const manual = Number(oceanSettings.oceanRadiusM);
+  if (Number.isFinite(manual) && manual > 0) {
+    return Math.max(50, manual);
+  }
+  return getAutoOceanDiscRadiusM(worldSettings, mapSizePx);
+}
+
+/** Auto radius for bathymetry / derived band maps — generous vs island footprint. */
+export function getAutoWaterMapRadiusM(worldSettings, mapSizePx = {}, exportSettings = {}) {
+  const footprint = getOceanFootprintRadiusM(worldSettings, mapSizePx);
+  const deep = Number(exportSettings.deepWaterDistanceM ?? exportSettings.deepStartM ?? 150);
+  const span = Math.max(
+    Number(worldSettings?.widthM ?? DEFAULT_WORLD_SETTINGS.widthM),
+    getDerivedDepthM(worldSettings, mapSizePx),
+  );
+  return Math.max(footprint * 1.15, deep * 2.5, span * 0.72);
+}
+
+/**
+ * Bathymetry & exported waterColor reach (m). Regenerate derived maps after changing.
+ * Independent from the 3D disc diameter slider.
+ */
+export function getWaterMapRadiusM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
+  if (oceanSettings?.waterMapRadiusAuto !== false) {
+    return getAutoWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings);
+  }
+  const manual = Number(oceanSettings.waterMapRadiusM);
+  if (Number.isFinite(manual) && manual > 0) {
+    return Math.max(50, manual);
+  }
+  return getAutoWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings);
+}
+
+/**
+ * 3D band rectangle footprint (m) — island map size expanded up to band reach diameter.
+ * Texture UV maps the exported cols×rows image onto the centered island region.
+ */
+export function getBandsPlaneDimsM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
+  const mapW = Math.max(50, Number(worldSettings?.widthM || DEFAULT_WORLD_SETTINGS.widthM));
+  const mapD = Math.max(50, getDerivedDepthM(worldSettings, mapSizePx));
+  const reachD = Math.max(100, getWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings) * 2);
+  return {
+    mapW,
+    mapD,
+    width: Math.max(mapW, reachD),
+    depth: Math.max(mapD, reachD),
+  };
+}
+
+/** World footprint (m) for a band texture — 1:1 with export pixels, not the reach slider alone. */
+export function bandsPlaneFromTexPx(texCols, texRows, terrainCols, terrainRows, mapW, mapD) {
+  const tc = Math.max(2, Number(texCols) || 2);
+  const tr = Math.max(2, Number(texRows) || 2);
+  const cols = Math.max(2, Number(terrainCols) || 2);
+  const rows = Math.max(2, Number(terrainRows) || 2);
+  const w = Math.max(50, Number(mapW) || 1480);
+  const d = Math.max(50, Number(mapD) || 1086);
+  return {
+    width: w * (tc - 1) / Math.max(1, cols - 1),
+    depth: d * (tr - 1) / Math.max(1, rows - 1),
+    texCols: tc,
+    texRows: tr,
+  };
+}
+
+/** Band texture pixels at island meters-per-pixel — grows canvas, does not scale art. */
+export function getBandsTexDimsPx(rows, cols, worldSettings, mapSizePx = {}, oceanSettings = {}) {
+  const { mapW, mapD, width: planeW, depth: planeD } = getBandsPlaneDimsM(
+    worldSettings,
+    mapSizePx,
+    oceanSettings,
+  );
+  const outCols = Math.max(cols, Math.round(((cols - 1) * planeW) / mapW) + 1);
+  const outRows = Math.max(rows, Math.round(((rows - 1) * planeD) / mapD) + 1);
+  return {
+    mapW,
+    mapD,
+    planeW,
+    planeD,
+    outCols,
+    outRows,
+    padC: Math.floor((outCols - cols) / 2),
+    padR: Math.floor((outRows - rows) / 2),
+  };
 }
 
 export function getMetersPerPixel(worldSettings, mapSizePx = {}) {

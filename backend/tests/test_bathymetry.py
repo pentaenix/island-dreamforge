@@ -7,6 +7,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.bathymetry import generate_bathymetry  # noqa: E402
+from app.water_palette import ISLAND_WATER_HEX, _hex_to_rgb, interpolate_water_ramp  # noqa: E402
 
 
 class BathymetryTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class BathymetryTests(unittest.TestCase):
         height[d <= 7] = (7 - d[d <= 7]) * 12 + 2
         return height
 
-    def test_bathymetry_uses_tight_posterized_bands(self):
+    def test_bathymetry_continuous_depth_field(self):
         height = self._height()
         island = height > 0
         data = generate_bathymetry(
@@ -34,6 +35,7 @@ class BathymetryTests(unittest.TestCase):
                 "bathymetrySmoothPx": 0,
                 "reefNoiseStrength": 0,
                 "coastalVariationStrength": 0,
+                "waterBandSmoothness": 0.35,
             },
         )
 
@@ -42,9 +44,14 @@ class BathymetryTests(unittest.TestCase):
         self.assertEqual(bathy.shape, height.shape)
         self.assertLess(float(shore[data["water_mask"]].min()), 30.0)
         unique = np.unique(np.round(bathy[data["water_mask"]], 3))
-        self.assertGreaterEqual(len(unique), 3)
-        self.assertLessEqual(len(unique), 8)
+        self.assertGreaterEqual(len(unique), 8)
         self.assertTrue(np.all(data["seafloor_height"][data["water_mask"]] <= 0))
+
+    def test_island_palette_colors(self):
+        shallow = np.array(_hex_to_rgb(ISLAND_WATER_HEX[0]), dtype=np.uint8)
+        deep = np.array(_hex_to_rgb(ISLAND_WATER_HEX[-1]), dtype=np.uint8)
+        self.assertTrue(np.allclose(interpolate_water_ramp(np.array([[0.0]]), 0.0)[0, 0], shallow))
+        self.assertTrue(np.allclose(interpolate_water_ramp(np.array([[1.0]]), 0.0)[0, 0], deep))
 
     def test_water_color_and_foam_maps_are_export_ready(self):
         height = self._height()

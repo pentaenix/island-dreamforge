@@ -5,7 +5,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from .bathymetry import generate_bathymetry
+from .bathymetry import expand_grid_for_bands_reach, generate_bathymetry
+from .distance_field import euclidean_distance_to_land
 
 
 MATERIAL_WATER = 0
@@ -139,14 +140,67 @@ def _fill_small_holes(mask: np.ndarray, max_area: int) -> np.ndarray:
     return out
 
 
+def _flood_exterior(passable: np.ndarray) -> np.ndarray:
+    """Pixels reachable from the map border through passable cells."""
+    grid = np.asarray(passable, dtype=bool)
+    rows, cols = grid.shape
+    exterior = np.zeros((rows, cols), dtype=bool)
+    q: deque[Tuple[int, int]] = deque()
+    for y in range(rows):
+        for x in range(cols):
+            if not grid[y, x]:
+                continue
+            if y == 0 or y == rows - 1 or x == 0 or x == cols - 1:
+                exterior[y, x] = True
+                q.append((y, x))
+    while q:
+        cy, cx = q.popleft()
+        for ny, nx in _iter_neighbors(cy, cx, rows, cols):
+            if grid[ny, nx] and not exterior[ny, nx]:
+                exterior[ny, nx] = True
+                q.append((ny, nx))
+    return exterior
+
+
+def refine_island_mask_for_ocean(
+    height: np.ndarray,
+    island_mask: np.ndarray,
+    options: Dict[str, Any] | None = None,
+) -> np.ndarray:
+    """
+    Punch subsea and enclosed-lagoon areas out of the land mask so bathymetry/water
+    are not inverted (black bays under a circular ocean plane).
+    """
+    opts = options or {}
+    h = np.asarray(height, dtype=np.float32)
+    land = np.asarray(island_mask, dtype=bool)
+    sea = float(opts.get("seaLevelM", 0.0) or 0.0)
+    threshold = float(opts.get("landThresholdM", sea + 0.25) or (sea + 0.25))
+    subsea = h <= threshold
+
+    land = land & (~subsea)
+
+    # Open-water pockets inside the island ring (crescent bay)
+    exterior_water = _flood_exterior(~land)
+    lagoon = (~land) & (~exterior_water)
+    land[lagoon] = False
+
+    # Enclosed subsea cavities wrongly filled as land by morphology
+    exterior_sea = _flood_exterior((~land) | subsea)
+    enclosed_subsea = (~exterior_sea) & subsea
+    land[enclosed_subsea] = False
+
+    return land.astype(bool)
+
+
 def derive_island_mask(height: np.ndarray, options: Dict[str, Any] | None = None) -> np.ndarray:
     """Return a cleaned boolean mask of land pixels from a meter height field."""
     opts = options or {}
     h = np.asarray(height, dtype=np.float32)
     sea = float(opts.get("seaLevelM", 0.0) or 0.0)
     threshold = float(opts.get("landThresholdM", sea + 0.25) or (sea + 0.25))
-    min_area = int(opts.get("minIslandAreaPx", 64) or 64)
-    keep_largest = _bool_option(opts, "keepLargestIsland", True)
+    min_area = int(opts.get("minIslandAreaPx", 16) or 16)
+    keep_largest = _bool_option(opts, "keepLargestIsland", False)
 
     mask = h > threshold
     mask = _close(mask, int(opts.get("maskClosePasses", 1) or 0))
@@ -173,47 +227,8 @@ def compute_distance_to_land(
     pixel_size_m: float,
     max_distance_m: float,
 ) -> np.ndarray:
-    """Chamfer distance from every water pixel to nearest land, in meters."""
-    land = np.asarray(island_mask, dtype=bool)
-    rows, cols = land.shape
-    max_d = float(max(0.0, max_distance_m))
-    if np.all(land):
-        return np.zeros((rows, cols), dtype=np.float32)
-    if not np.any(land):
-        return np.full((rows, cols), max_d, dtype=np.float32)
-
-    ortho = float(max(1e-6, pixel_size_m))
-    diag = ortho * 1.41421356
-    large = max_d + diag * (rows + cols + 2)
-    dist = np.where(land, 0.0, large).astype(np.float32)
-
-    for y in range(rows):
-        for x in range(cols):
-            best = dist[y, x]
-            if y > 0:
-                best = min(best, float(dist[y - 1, x]) + ortho)
-                if x > 0:
-                    best = min(best, float(dist[y - 1, x - 1]) + diag)
-                if x + 1 < cols:
-                    best = min(best, float(dist[y - 1, x + 1]) + diag)
-            if x > 0:
-                best = min(best, float(dist[y, x - 1]) + ortho)
-            dist[y, x] = best
-
-    for y in range(rows - 1, -1, -1):
-        for x in range(cols - 1, -1, -1):
-            best = dist[y, x]
-            if y + 1 < rows:
-                best = min(best, float(dist[y + 1, x]) + ortho)
-                if x > 0:
-                    best = min(best, float(dist[y + 1, x - 1]) + diag)
-                if x + 1 < cols:
-                    best = min(best, float(dist[y + 1, x + 1]) + diag)
-            if x + 1 < cols:
-                best = min(best, float(dist[y, x + 1]) + ortho)
-            dist[y, x] = best
-
-    return np.minimum(dist, max_d).astype(np.float32)
+    """Euclidean distance from every cell to nearest land, in meters."""
+    return euclidean_distance_to_land(island_mask, pixel_size_m, max_distance_m)
 
 
 def _world_coordinates(rows: int, cols: int, options: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -253,8 +268,10 @@ def generate_ocean_bathymetry(
     island_mask: np.ndarray,
     options: Dict[str, Any] | None = None,
 ) -> Dict[str, np.ndarray]:
-    """Create seafloor height and water-depth maps that deepen away from land."""
-    return generate_bathymetry(height, island_mask, options or {})
+    """Bathymetry on an expanded plane (band reach) at the same meters-per-pixel as the island map."""
+    opts = options or {}
+    h, mask, opts_exp = expand_grid_for_bands_reach(height, island_mask, opts)
+    return generate_bathymetry(h, mask, opts_exp)
 
 
 def _slope_norm(height: np.ndarray, pixel_size_m: float) -> np.ndarray:

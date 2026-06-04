@@ -27,10 +27,10 @@ The runner checks for Python 3.10-3.13 and Node 18+, creates the backend virtual
 
 ## Workflow
 
-1. **Heights** — upload a base map, click a color, type only the height in meters. The app starts with a single water height at 0 m, samples the map pixel-perfectly, and keeps matching-pixel preview off until you explicitly turn it on.
-2. **Textures** — configure the procedural art pass before water/final editing. Control texture resolution, pixel size, fuzziness, normal/bump strength, tree density, rock steepness, gravel amount, sand bands, wet sand, and transition softness.
-3. **Water & Layers** — add optional water, structure, marker, and texture overlays. You can have no water layer. Every overlay can be cleared, deleted, hidden, or exported.
-4. **3D / Export** — orbit the terrain in Move mode by default, intentionally choose sculpt/paint tools when needed, use the projected brush circle for feedback, regenerate procedural textures, and export meshes/maps.
+1. **Heights** — color → height ladder, optional **flat-section masks** (any color on PNG; height comes from the color map), then generate the height map.
+2. **Textures** — procedural art pass (resolution, tiling, forest blocks, rock slopes, etc.).
+3. **Water** — ocean disc preview; optional water masks that bake shallow indents or local flattening into the height map.
+4. **3D / Export** — viewport sculpt/paint; structure, marker, and texture overlays for preview and JSON export.
 
 ## Important behavior
 

@@ -8,6 +8,7 @@ import {
   imageDataToCanvasTexture,
   paintDemoMountTextures,
 } from './proceduralTerrainTexture.js';
+import { textureNormsFromSettings } from './textureNorms.js';
 
 const MOUNT_GRID = 80;
 const TEX_SIZE = 640;
@@ -30,21 +31,25 @@ function applyView(controls, camera, key) {
   controls.update();
 }
 
-export default function TextureMountPreview({ settings }) {
+export default function TextureMountPreview({ settings, maxHeightM, seaLevelM }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const applyTexturesRef = useRef(null);
   const activeViewRef = useRef('overview');
   const mountField = useMemo(() => buildSyntheticMountField(MOUNT_GRID, MOUNT_GRID), []);
-  const settingsKey = useMemo(() => JSON.stringify(settings ?? {}), [settings]);
+  const world = useMemo(
+    () => ({ maxHeightM: maxHeightM ?? settings?.maxHeightM ?? DEMO_MOUNT_WORLD.maxHeightM, seaLevelM: seaLevelM ?? settings?.seaLevelM ?? 0 }),
+    [maxHeightM, seaLevelM, settings?.maxHeightM, settings?.seaLevelM],
+  );
+  const settingsKey = useMemo(() => JSON.stringify({ settings, world }), [settings, world]);
 
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return undefined;
 
     let cancelled = false;
-    const { maxHeightM } = DEMO_MOUNT_WORLD;
-    const seaY = mountField.seaNorm * maxHeightM;
+    const norms = textureNormsFromSettings(settings ?? {}, world);
+    const seaY = norms.seaNorm * norms.maxHeightM;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x87bfe8);
@@ -100,7 +105,7 @@ export default function TextureMountPreview({ settings }) {
 
     const applyTextures = (settingsNext) => {
       if (cancelled) return;
-      const painted = paintDemoMountTextures(settingsNext, mountField, TEX_SIZE);
+      const painted = paintDemoMountTextures(settingsNext, mountField, TEX_SIZE, world);
       const nextAlbedo = imageDataToCanvasTexture(painted.color, { color: true });
       const nextNormal = imageDataToCanvasTexture(painted.normal, { color: false });
 

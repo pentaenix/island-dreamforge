@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import MapPicker from './MapPicker.jsx';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import MapPicker, { FLAT_MASK_MAP_OPACITY } from './MapPicker.jsx';
 import { buildDraftHeightField } from './heightProfile.js';
 import { Segmented } from './studioUi.jsx';
 
@@ -37,6 +37,8 @@ export default function HeightsMapViewport({
   onPick,
   onEnsureHeightmap,
   canGenerate,
+  flatSectionLayers = [],
+  showFlatMaskOnMap = true,
 }) {
   const [viewMode, setViewMode] = useState('color');
   const [showColorMatch, setShowColorMatch] = useState(true);
@@ -48,6 +50,13 @@ export default function HeightsMapViewport({
 
   const needsBackendHeight = !heightPreview || heightOutOfDate;
   const showDraft = viewMode !== 'color' && needsBackendHeight;
+
+  const flatMaskOverlays = useMemo(() => {
+    if (!showFlatMaskOnMap) return [];
+    return (flatSectionLayers || [])
+      .filter((l) => l.enabled !== false && l.url)
+      .map((l) => ({ url: l.url, opacity: FLAT_MASK_MAP_OPACITY }));
+  }, [flatSectionLayers, showFlatMaskOnMap]);
 
   useEffect(() => {
     if (!showDraft || !mapUrl || !samples?.length) {
@@ -178,6 +187,7 @@ export default function HeightsMapViewport({
           <MapPicker
             imageUrl={mapUrl}
             mapVersion={mapVersion}
+            flatMaskOverlays={flatMaskOverlays}
             picked={picked}
             pixelPerfect={options.exactColorMode}
             similarRadius={similarRadius}
@@ -193,6 +203,7 @@ export default function HeightsMapViewport({
               <MapPicker
                 imageUrl={mapUrl}
                 mapVersion={mapVersion}
+                flatMaskOverlays={flatMaskOverlays}
                 picked={picked}
                 pixelPerfect={options.exactColorMode}
                 similarRadius={similarRadius}
