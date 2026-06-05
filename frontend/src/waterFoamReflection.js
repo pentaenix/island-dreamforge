@@ -10,6 +10,8 @@ const OceanReflectionShader = {
   uniforms: {
     tDiffuse: { value: null },
     textureMatrix: { value: new THREE.Matrix4() },
+    wetMask: { value: null },
+    wetMaskEnabled: { value: 0 },
     reflectionStrength: { value: 0.38 },
     distortionStrength: { value: 0.2 },
     distortionScale: { value: 85 },
@@ -19,9 +21,11 @@ const OceanReflectionShader = {
   vertexShader: /* glsl */ `
     uniform mat4 textureMatrix;
     varying vec4 vReflectUv;
+    varying vec2 vDiscUv;
     varying vec3 vWorldPos;
 
     void main() {
+      vDiscUv = uv;
       vReflectUv = textureMatrix * vec4(position, 1.0);
       vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -29,15 +33,24 @@ const OceanReflectionShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
+    uniform sampler2D wetMask;
+    uniform float wetMaskEnabled;
     uniform float reflectionStrength;
     uniform float distortionStrength;
     uniform float distortionScale;
     uniform vec3 tintColor;
     uniform float tintStrength;
     varying vec4 vReflectUv;
+    varying vec2 vDiscUv;
     varying vec3 vWorldPos;
 
     void main() {
+      float wet = 1.0;
+      if (wetMaskEnabled > 0.5) {
+        wet = texture2D(wetMask, vDiscUv).r;
+        if (wet < 0.04) discard;
+      }
+
       vec2 uv = vReflectUv.xy / max(vReflectUv.w, 1e-5);
       float d = distortionStrength;
       if (d > 0.001) {
@@ -47,8 +60,8 @@ const OceanReflectionShader = {
       }
       vec3 refl = texture2D(tDiffuse, uv).rgb;
       refl = mix(refl, refl * tintColor, clamp(tintStrength, 0.0, 1.0));
-      float alpha = reflectionStrength * 0.72;
-      if (alpha < 0.015) discard;
+      float alpha = reflectionStrength * 0.72 * wet;
+      if (alpha < 0.01) discard;
       gl_FragColor = vec4(refl * reflectionStrength, alpha);
     }
   `,
@@ -159,7 +172,7 @@ function attachReflectionRenderPass(scope, renderTarget, textureMatrix, camera) 
 /**
  * Circular reflection-only disc — duplicate of the deep ocean circle, no albedo.
  */
-export function createOceanReflectionDiscMesh(discRadius, ocean = {}) {
+export function createOceanReflectionDiscMesh(discRadius, ocean = {}, wetMaskTexture = null) {
   const opts = reflectionOptionsFromOcean(ocean);
   const geometry = new THREE.CircleGeometry(Math.max(50, discRadius), 128);
   const scope = new THREE.Mesh(geometry);
@@ -188,6 +201,8 @@ export function createOceanReflectionDiscMesh(discRadius, ocean = {}) {
   });
   material.uniforms.tDiffuse.value = renderTarget.texture;
   material.uniforms.textureMatrix.value = textureMatrix;
+  material.uniforms.wetMask.value = wetMaskTexture;
+  material.uniforms.wetMaskEnabled.value = wetMaskTexture ? 1 : 0;
   material.uniforms.reflectionStrength.value = opts.strength;
   material.uniforms.distortionStrength.value = opts.distortion;
   material.uniforms.distortionScale.value = opts.distortionScale;
@@ -198,6 +213,7 @@ export function createOceanReflectionDiscMesh(discRadius, ocean = {}) {
 
   scope.userData.disposeReflection = () => {
     renderTarget.dispose();
+    wetMaskTexture?.dispose?.();
     material.dispose();
   };
 

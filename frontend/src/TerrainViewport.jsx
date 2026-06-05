@@ -453,6 +453,12 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     resetCamera() {
       frameCinematicCamera(stateRef.current, propsRef.current);
     },
+    syncOceanLayerHeights(ocean) {
+      applyOceanLayerHeights(
+        stateRef.current.water,
+        ocean || propsRef.current.oceanSettings || {},
+      );
+    },
   }));
 
   useEffect(() => {
@@ -666,7 +672,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   useEffect(() => {
     const s = stateRef.current;
     if (!s.water) return;
-    applyOceanLayerHeights(s.water, oceanSettings);
+    applyOceanLayerHeights(s.water, propsRef.current.oceanSettings || {});
   }, [
     oceanSettings?.oceanBandsOffsetM,
     oceanSettings?.oceanFoamOffsetM,
@@ -791,6 +797,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     if (water) {
       water.renderOrder = 0;
       s.scene.add(water);
+      applyOceanLayerHeights(water, propsRef.current.oceanSettings || {});
     }
     s.coastlineSkirt = null;
     s.sceneBounds = applyViewportCameraLimits(
@@ -824,7 +831,10 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       s.cols,
     );
     s.water = water;
-    if (water) s.scene.add(water);
+    if (water) {
+      s.scene.add(water);
+      applyOceanLayerHeights(water, propsRef.current.oceanSettings || {});
+    }
     s.sceneBounds = applyViewportCameraLimits(
       s.camera,
       s.controls,

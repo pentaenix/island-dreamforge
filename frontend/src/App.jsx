@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import TerrainViewport, { MATERIALS } from './TerrainViewport.jsx';
 import HeightsStudio from './HeightsStudio.jsx';
 import { SceneLayerCard } from './layerUi.jsx';
@@ -6,9 +6,10 @@ import TexturesStudio from './TexturesStudio.jsx';
 import { DEFAULT_TEXTURE_SETTINGS, normalizeTextureSettings } from './textureSettings.js';
 import ExportProfilePanel from './ExportProfilePanel.jsx';
 import WaterSettingsPanel from './WaterSettingsPanel.jsx';
+import OceanLayerHeightControls from './OceanLayerHeightControls.jsx';
 import WaterDiscPreview from './WaterDiscPreview.jsx';
 import { buildWaterDiscPreview } from './waterDiscPreviewClient.js';
-import { Slider } from './studioUi.jsx';
+import { Slider, CollapsibleSection } from './studioUi.jsx';
 import { API_URL, dataUrlToBlob, downloadBlob, postForm } from './api.js';
 import {
   DEFAULT_WORLD_SETTINGS,
@@ -145,9 +146,9 @@ const DEFAULT_EXPORT_SETTINGS = {
   waterReflectionDistortionScale: 0,
   waterReflectionTint: 0.22,
   waterReflectionResolution: 512,
-  oceanBandsOffsetM: 1.35,
-  oceanFoamOffsetM: 2.6,
-  oceanReflectionOffsetM: 2.78,
+  oceanBandsOffsetM: 0.1,
+  oceanFoamOffsetM: 0.14,
+  oceanReflectionOffsetM: 0.12,
   coastlineSkirtDepthM: 40,
   seafloorNoiseM: 6,
   circularFalloffSoftnessM: 200,
@@ -242,6 +243,11 @@ function normalizeRestoredStage(raw) {
 
 export default function App() {
   const viewportRef = useRef(null);
+  const syncOceanLayerHeights = useCallback((settings) => {
+    requestAnimationFrame(() => {
+      viewportRef.current?.syncOceanLayerHeights?.(settings);
+    });
+  }, []);
   const [stage, setStage] = useState(1);
   const [mapFile, setMapFile] = useState(null);
   const [mapUrl, setMapUrl] = useState('');
@@ -1077,6 +1083,15 @@ export default function App() {
   }, [stage, waterPreviewKey]);
 
   React.useEffect(() => {
+    syncOceanLayerHeights(exportSettings);
+  }, [
+    syncOceanLayerHeights,
+    exportSettings.oceanBandsOffsetM,
+    exportSettings.oceanFoamOffsetM,
+    exportSettings.oceanReflectionOffsetM,
+  ]);
+
+  React.useEffect(() => {
     if (stage < 3 || !finalHeight) return;
     const timer = setTimeout(() => {
       refreshDerivedMaps({ silent: true });
@@ -1226,6 +1241,7 @@ export default function App() {
             worldSettings={worldSettings}
             mapSizePx={mapSizePx}
             autoOceanRadiusM={getOceanDiscRadiusM(worldSettings, mapSizePx, { ...exportSettings, oceanRadiusAuto: true })}
+            onHeightsChange={syncOceanLayerHeights}
           />
           <div className="actions compact">
             <button type="button" className="primary" onClick={() => refreshWaterDiscPreview()}>Refresh preview</button>
@@ -1325,6 +1341,13 @@ export default function App() {
           {activeLayer?.analysis && activeLayer.kind !== 'water' && activeLayer.kind !== 'flat' && (
             <pre className="json-preview">{JSON.stringify({ summary: activeLayer.analysis.summary, firstFeatures: activeLayer.analysis.features?.slice(0, 6) }, null, 2)}</pre>
           )}
+          <CollapsibleSection title="Ocean layer heights" defaultOpen>
+            <OceanLayerHeightControls
+              settings={exportSettings}
+              setSettings={setExportSettings}
+              onHeightsChange={syncOceanLayerHeights}
+            />
+          </CollapsibleSection>
           <h3>Exports</h3>
           <div className="tool-grid">
             <button className="primary" onClick={() => exportPreviewGlb()} disabled={!finalPreview}>Export 3D preview (GLB)</button>

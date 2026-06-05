@@ -7,8 +7,9 @@ import {
   getOceanFootprintRadiusM,
   WATER_DISC_SLIDER_MAX_DIAMETER_M,
 } from './worldSettings.js';
+import OceanLayerHeightControls from './OceanLayerHeightControls.jsx';
 
-export default function WaterSettingsPanel({ settings, setSettings, autoOceanRadiusM, worldSettings, mapSizePx }) {
+export default function WaterSettingsPanel({ settings, setSettings, autoOceanRadiusM, worldSettings, mapSizePx, onHeightsChange }) {
   const patch = (next) => setSettings((prev) => ({ ...prev, ...next }));
   const autoMode = settings.oceanRadiusAuto !== false;
   const autoRadiusM = Number(
@@ -180,34 +181,10 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
       />
       <p className="small muted">Fades wave crests near the ocean circle edge. Shore fade suppresses crests right against the island.</p>
 
-      <h4>Layer heights (3D stack)</h4>
-      <p className="small muted">Distance above the deep ocean disc for each upper layer. The bottom disc stays fixed.</p>
-      <Slider
-        label="Bands layer"
-        value={settings.oceanBandsOffsetM ?? 1.35}
-        min={0.1}
-        max={12}
-        step={0.05}
-        suffix="m"
-        onChange={(v) => patch({ oceanBandsOffsetM: v })}
-      />
-      <Slider
-        label="Reflection layer"
-        value={settings.oceanReflectionOffsetM ?? 2.78}
-        min={0.1}
-        max={12}
-        step={0.05}
-        suffix="m"
-        onChange={(v) => patch({ oceanReflectionOffsetM: v })}
-      />
-      <Slider
-        label="Foam layer"
-        value={settings.oceanFoamOffsetM ?? 2.6}
-        min={0.1}
-        max={12}
-        step={0.05}
-        suffix="m"
-        onChange={(v) => patch({ oceanFoamOffsetM: v })}
+      <OceanLayerHeightControls
+        settings={settings}
+        setSettings={setSettings}
+        onHeightsChange={onHeightsChange}
       />
 
       <h4>Foam reflection (3D viewport)</h4>

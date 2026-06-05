@@ -10,39 +10,48 @@ import * as THREE from 'three';
 import { buildFoamLayerTextureUrl, buildWaterBandsMapUrl } from './waterSurfaceComposite.js';
 import { createOceanReflectionDiscMesh, isWaterReflectionEnabled } from './waterFoamReflection.js';
 import { defaultBandEdgesM, ISLAND_WATER_HEX } from './waterPalette.js';
+import { buildDiscLandAlphaUrl } from './waterMaskFromHeights.js';
 import { getOceanDiscRadiusM, getWorldDimsM } from './worldSettings.js';
 
 const DEEP_OCEAN_HEX = ISLAND_WATER_HEX[ISLAND_WATER_HEX.length - 1];
 
 /** Fixed Y for the bottom deep-ocean disc (local to the water group). */
-export const OCEAN_DEEP_Y_M = 0.3;
+export const OCEAN_DEEP_Y_M = 0.02;
 
-export const DEFAULT_OCEAN_LAYER_OFFSETS_M = {
-  bands: 1.35,
-  foam: 2.6,
-  reflection: 2.78,
+export const DEFAULT_OCEAN_LAYER_HEIGHTS_M = {
+  bands: 0.1,
+  foam: 0.14,
+  reflection: 0.12,
 };
+
+/** Read absolute local Y for an upper stack layer — no clamping; use fallback only when unset/invalid. */
+function layerHeightM(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 /** Local Y heights for each ocean stack layer (deep disc is fixed). */
 export function getOceanLayerHeightsM(ocean = {}) {
   const deep = OCEAN_DEEP_Y_M;
   return {
     deep,
-    bands: deep + Math.max(0.05, Number(ocean.oceanBandsOffsetM ?? DEFAULT_OCEAN_LAYER_OFFSETS_M.bands)),
-    foam: deep + Math.max(0.05, Number(ocean.oceanFoamOffsetM ?? DEFAULT_OCEAN_LAYER_OFFSETS_M.foam)),
-    reflection: deep + Math.max(0.05, Number(ocean.oceanReflectionOffsetM ?? DEFAULT_OCEAN_LAYER_OFFSETS_M.reflection)),
+    bands: layerHeightM(ocean.oceanBandsOffsetM, DEFAULT_OCEAN_LAYER_HEIGHTS_M.bands),
+    foam: layerHeightM(ocean.oceanFoamOffsetM, DEFAULT_OCEAN_LAYER_HEIGHTS_M.foam),
+    reflection: layerHeightM(ocean.oceanReflectionOffsetM, DEFAULT_OCEAN_LAYER_HEIGHTS_M.reflection),
   };
 }
 
 export function applyOceanLayerHeights(waterGroup, ocean = {}) {
   if (!waterGroup) return;
   const h = getOceanLayerHeightsM(ocean);
-  waterGroup.traverse((child) => {
+  waterGroup.userData.layerHeights = { ...h };
+  for (const child of waterGroup.children) {
     if (child.name === 'ocean-deep-disc') child.position.y = h.deep;
     else if (child.name === 'ocean-bands-rect') child.position.y = h.bands;
     else if (child.name === 'ocean-foam-square') child.position.y = h.foam;
     else if (child.name === 'ocean-reflection-disc') child.position.y = h.reflection;
-  });
+  }
+  waterGroup.updateMatrixWorld(true);
 }
 
 function layerMaterial(opts) {
@@ -230,7 +239,20 @@ export async function createWaterStack3d({
   }
 
   if (isWaterReflectionEnabled(ocean)) {
-    const reflectionMesh = createOceanReflectionDiscMesh(discRadius, ocean);
+    const wetMaskUrl = buildDiscLandAlphaUrl(
+      discRadius,
+      rows,
+      cols,
+      heights,
+      seaLevel,
+      maxHeightM,
+      world,
+      ocean,
+      mapSizePx,
+      512,
+    );
+    const wetMaskTex = await loadTexture(wetMaskUrl);
+    const reflectionMesh = createOceanReflectionDiscMesh(discRadius, ocean, wetMaskTex);
     reflectionMesh.rotation.x = -Math.PI / 2;
     reflectionMesh.position.y = layerY.reflection;
     reflectionMesh.renderOrder = 2;
@@ -238,5 +260,6 @@ export async function createWaterStack3d({
     group.add(reflectionMesh);
   }
 
+  applyOceanLayerHeights(group, ocean);
   return group;
 }
