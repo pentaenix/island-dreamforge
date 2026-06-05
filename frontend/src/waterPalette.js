@@ -2,6 +2,7 @@
  * Island Dreamforge ocean palette (shallow → deep).
  * Keep in sync with backend/app/water_palette.py and water_band_steps.py
  */
+import { getWorldOceanSettings } from './waterWorldScale.js';
 export const ISLAND_WATER_HEX = [
   '#D8EFE8',
   '#7ED0D5',
@@ -75,23 +76,24 @@ export function bandEdgesFromSteps(baseM, increaseM, count = NUM_WATER_BANDS, gr
   return edges;
 }
 
-export function defaultBandEdgesM(options = {}) {
-  const custom = options.waterBandEdgesM;
+export function defaultBandEdgesM(options = {}, worldSettings = null) {
+  const opts = worldSettings ? getWorldOceanSettings(options, worldSettings) : options;
+  const custom = opts.waterBandEdgesM;
   if (Array.isArray(custom) && custom.length >= 2) {
     return [...custom].map(Number).sort((a, b) => a - b);
   }
 
   return bandEdgesFromSteps(
-    options.waterBandStepM ?? 12,
-    options.waterBandStepIncreaseM ?? 8,
+    opts.waterBandStepM ?? 12,
+    opts.waterBandStepIncreaseM ?? 8,
     NUM_WATER_BANDS,
-    options.waterBandStepGrowthPower ?? 2,
+    opts.waterBandStepGrowthPower ?? 2,
   );
 }
 
 /** Total meters from shore covered by step + increase bands (for auto band-reach sizing). */
-export function totalBandReachM(options = {}) {
-  const edges = defaultBandEdgesM(options);
+export function totalBandReachM(options = {}, worldSettings = null) {
+  const edges = defaultBandEdgesM(options, worldSettings);
   return edges[edges.length - 1] || 0;
 }
 

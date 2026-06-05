@@ -62,7 +62,12 @@ export function buildWaterDiscPreview(options = {}) {
   const bandSmooth = Number(options.waterBandSmoothness ?? options.waterColorSmoothness ?? 0.35);
 
   const size = 640;
-  const edges = defaultBandEdgesM(options);
+  const worldSettings = {
+    widthM: options.widthM,
+    depthM: options.depthM,
+    lockAspect: options.lockAspect,
+  };
+  const edges = defaultBandEdgesM(options, worldSettings);
   const shallowEdge = edges[2] ?? 24;
   const deepEdge = edges[edges.length - 2] ?? 150;
   const reefScaleM = Math.max(8, Number(options.waterNoiseScaleM ?? 85) * 0.65);

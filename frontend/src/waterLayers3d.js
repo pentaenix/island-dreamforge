@@ -147,7 +147,7 @@ export async function createWaterStack3d({
   group.add(baseMesh);
 
   if (waterColorUrl) {
-    const edges = defaultBandEdgesM(ocean);
+    const edges = defaultBandEdgesM(ocean, world);
     const bandReachM = edges[edges.length - 1] || 0;
     const reachM = Math.max(bandReachM, discRadius);
     const mppX = mapW / Math.max(1, cols);

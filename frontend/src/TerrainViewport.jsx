@@ -18,6 +18,16 @@ import { tintSampledMaterial } from './materialColors.js';
 import { createWaterStack3d, disposeWaterStack, applyOceanLayerHeights } from './waterLayers3d.js';
 import { updateFoamReflectionUniforms } from './waterFoamReflection.js';
 import { isLandVertexM } from './waterMaskFromHeights.js';
+import {
+  applyWaterOverlayPaintToImageData,
+  buildCombinedWaterOverlayMask,
+  buildHeightmapWaterMask,
+  buildWaterOverlayPaintLayers,
+  countMaskPixels,
+  hexToRgb,
+} from './riverTexturePaint.js';
+import { aggregateLakeFlattenSettings } from './waterOverlaySettings.js';
+import { applyLakeFlattenToHeights } from './waterLakeFlatten.js';
 import { exportViewportSceneGlb } from './viewportSceneExport.js';
 import { dataUrlToBlob } from './api.js';
 
@@ -369,6 +379,8 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   shoreDistanceMaxM = 0,
   foamMaskUrl = '',
   waterMaskUrl = '',
+  riverMaskUrl = '',
+  riverOverlaySettings = {},
   islandMaskUrl = '',
   materialPreviewUrl = '',
   showSeafloor = false,
@@ -379,8 +391,8 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   const heightUrlRef = useRef(heightUrl);
   heightUrlRef.current = heightUrl;
   const viewportReadyRef = useRef(false);
-  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings });
-  propsRef.current = { tool, brush, selectedMaterial, textureSettings, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings };
+  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, layers, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, riverMaskUrl, riverOverlaySettings, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings });
+  propsRef.current = { tool, brush, selectedMaterial, textureSettings, layers, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, riverMaskUrl, riverOverlaySettings, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings };
 
   const stateRef = useRef({
     rows: 0, cols: 0, heights: null, islandMask: null, materialPreview: null,
@@ -390,7 +402,9 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     normalCanvas: null, normalContext: null, normalTexture: null,
     patterns: {}, isPainting: false,
     raycaster: new THREE.Raycaster(), pointer: new THREE.Vector2(),
-    water: null, waterNormals: null, skybox: null, viewportConfig: null, seafloor: null, coastlineSkirt: null,
+    water: null, waterNormals: null, waterOverlayMaskGrid: null, waterOverlayMaskKey: '',
+    waterOverlayPaintLayers: [], waterHeightmapMask: null, waterOverlayDims: null, heightsSource: null,
+    skybox: null, viewportConfig: null, seafloor: null, coastlineSkirt: null,
     patternTextures: {}, overlayGroup: null, vegetationGroup: null, brushRing: null,
     sceneBounds: null,
     lastPointer: { x: 0, y: 0, hit: false },
@@ -458,6 +472,14 @@ const TerrainViewport = forwardRef(function TerrainViewport({
         stateRef.current.water,
         ocean || propsRef.current.oceanSettings || {},
       );
+    },
+    syncRiverTexturePaint() {
+      const s = stateRef.current;
+      if (!s.heights || !s.textureContext) return Promise.resolve(false);
+      return refreshWaterOverlayMask(s).then(() => {
+        paintAutoTexture(s, true);
+        return (s.waterOverlayMaskPixelCount || 0) > 0;
+      });
     },
   }));
 
@@ -613,19 +635,6 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   }, [tool, brush?.size]);
   useEffect(() => {
     const s = stateRef.current;
-    if (s.heights && s.textureContext) paintAutoTexture(s, false);
-    renderVegetationClumps(s);
-    const st = propsRef.current.textureSettings || {};
-    if (s.dioramaLights) {
-      applyDioramaLighting(s.dioramaLights, dioramaLightingFromSettings(st), {
-        renderer: s.renderer,
-        scene: s.scene,
-        material: s.material,
-      });
-    }
-  }, [textureSettings]);
-  useEffect(() => {
-    const s = stateRef.current;
     if (s.water) s.water.position.y = Number(seaLevelM || 0);
   }, [seaLevelM]);
   useEffect(() => {
@@ -642,6 +651,27 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     textureSettings?.textureSize,
   ]);
   useEffect(() => { const s = stateRef.current; if (heightUrl && s.heights) rebuildTerrain(heightUrl); }, [waterDepthUrl, waterColorUrl, foamMaskUrl, waterMaskUrl, islandMaskUrl, materialPreviewUrl, showSeafloor]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.heights || !s.textureContext) return;
+    refreshWaterOverlayMask(s).then(() => paintAutoTexture(s, true));
+  }, [layers, heightUrl]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.heights || !s.textureContext) return;
+    refreshWaterOverlayMask(s).then(() => {
+      paintAutoTexture(s, true);
+      renderVegetationClumps(s);
+      const st = propsRef.current.textureSettings || {};
+      if (s.dioramaLights) {
+        applyDioramaLighting(s.dioramaLights, dioramaLightingFromSettings(st), {
+          renderer: s.renderer,
+          scene: s.scene,
+          material: s.material,
+        });
+      }
+    });
+  }, [textureSettings]);
   useEffect(() => {
     const s = stateRef.current;
     if (!s.scene || !s.heights) return;
@@ -736,12 +766,18 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       loadImageData(propsRef.current.materialPreviewUrl, cols, rows),
     ]);
 
-    s.rows = rows; s.cols = cols; s.heights = heights; s.islandMask = islandMask; s.materialPreview = materialPreview;
+    s.rows = rows; s.cols = cols; s.heights = heights; s.heightsSource = Float32Array.from(heights);
+    s.islandMask = islandMask; s.materialPreview = materialPreview;
     const texSize = clamp(Number(propsRef.current.textureSettings?.textureSize || 1024), 512, 8192);
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = texSize; textureCanvas.height = texSize;
     const normalCanvas = document.createElement('canvas'); normalCanvas.width = texSize; normalCanvas.height = texSize;
     s.textureCanvas = textureCanvas; s.textureContext = textureCanvas.getContext('2d', { willReadFrequently: true });
     s.normalCanvas = normalCanvas; s.normalContext = normalCanvas.getContext('2d', { willReadFrequently: true });
+    s.waterOverlayMaskKey = null;
+    s.waterOverlayMaskGrid = null;
+    s.waterOverlayMaskPixelCount = 0;
+    s.waterOverlayPaintLayers = [];
+    await refreshWaterOverlayMask(s);
     paintAutoTexture(s, true);
     const texture = new THREE.CanvasTexture(textureCanvas);
     texture.wrapS = THREE.ClampToEdgeWrapping; texture.wrapT = THREE.ClampToEdgeWrapping; texture.colorSpace = THREE.SRGBColorSpace;
@@ -751,7 +787,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     normalTexture.colorSpace = THREE.LinearSRGBColorSpace;
     s.texture = texture; s.normalTexture = normalTexture;
 
-    const geometry = makeGeometry(heights, rows, cols, Number(maxHeightM || 500), propsRef.current.worldSettings || {}, islandMask, Number(propsRef.current.seaLevelM || 0));
+    const geometry = makeGeometry(s.heights, rows, cols, Number(maxHeightM || 500), propsRef.current.worldSettings || {}, islandMask, Number(propsRef.current.seaLevelM || 0));
     const st = propsRef.current.textureSettings || {};
     const lightCfg = dioramaLightingFromSettings(st);
     const material = new THREE.MeshStandardMaterial({
@@ -781,7 +817,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       propsRef.current.worldSettings || {},
       propsRef.current.oceanSettings || {},
       Number(propsRef.current.seaLevelM || 0),
-      heights,
+      s.heights,
       Number(maxHeightM || 500),
     );
     s.seafloor = seafloor;
@@ -799,6 +835,8 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       s.scene.add(water);
       applyOceanLayerHeights(water, propsRef.current.oceanSettings || {});
     }
+    await refreshWaterOverlayMask(s);
+    paintAutoTexture(s, true);
     s.coastlineSkirt = null;
     s.sceneBounds = applyViewportCameraLimits(
       s.camera,
@@ -1077,10 +1115,59 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       }
     }
 
+    if (s.waterOverlayPaintLayers?.length && s.waterOverlayMaskPixelCount > 0) {
+      for (const pl of s.waterOverlayPaintLayers) {
+        if (countMaskPixels(pl.mask) === 0) continue;
+        applyWaterOverlayPaintToImageData(img, size, size, pl.mask, {
+          waterRgb: hexToRgb(pl.paintColor),
+          strength: pl.paintStrength,
+          landOnly: false,
+        });
+      }
+    }
+
     ctx.putImageData(img, 0, 0);
     nctx.putImageData(painted.normal, 0, 0);
     if (s.texture) s.texture.needsUpdate = true;
     if (s.normalTexture) s.normalTexture.needsUpdate = true;
+  }
+
+  async function refreshWaterOverlayMask(s) {
+    const layers = propsRef.current.layers || [];
+    if (!s.textureCanvas || !s.rows) {
+      s.waterOverlayMaskGrid = null;
+      s.waterOverlayMaskPixelCount = 0;
+      return;
+    }
+    const size = s.textureCanvas.width;
+    const key = JSON.stringify({
+      tex: size,
+      rows: s.rows,
+      cols: s.cols,
+      layers: layers
+        .filter((l) => l.kind === 'water')
+        .map((l) => ({
+          id: l.id,
+          url: l.url,
+          enabled: l.enabled,
+          maskThreshold: l.maskThreshold,
+          paintStrength: l.paintStrength,
+        })),
+    });
+    if (s.waterOverlayMaskKey === key && s.waterOverlayMaskGrid) return;
+    s.waterOverlayMaskKey = key;
+    s.waterOverlayMaskGrid = await buildCombinedWaterOverlayMask(
+      layers,
+      size,
+      size,
+      s.rows,
+      s.cols,
+    );
+    s.waterOverlayPaintStrength = aggregateWaterPaintStrength(layers);
+    s.waterOverlayMaskPixelCount = countMaskPixels(s.waterOverlayMaskGrid);
+    if (s.waterOverlayMaskPixelCount === 0 && layers.some((l) => l.kind === 'water' && l.enabled !== false && l.url)) {
+      console.warn('[rivers] Overlay loaded but no painted pixels matched — use opaque blue/cyan strokes or lower mask sensitivity.');
+    }
   }
 
   async function makeWaterPlane(seaLevel, world = {}, rows = 64, cols = 64) {

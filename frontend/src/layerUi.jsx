@@ -1,6 +1,9 @@
 import React from 'react';
 import { Slider } from './studioUi.jsx';
 import { MATERIALS } from './TerrainViewport.jsx';
+import { getMetersPerPixel } from './worldSettings.js';
+import { getWaterLayerSliderLimits } from './waterOverlaySettings.js';
+import { DEFAULT_WATER_PAINT_COLOR } from './riverTexturePaint.js';
 
 /** Shared overlay card for water / structure / marker / texture (not flat sections). */
 export function SceneLayerCard({
@@ -13,8 +16,14 @@ export function SceneLayerCard({
   onExport,
   onDelete,
   onClear,
+  worldSettings = {},
+  mapSizePx = {},
   children,
 }) {
+  const mpp = getMetersPerPixel(worldSettings, mapSizePx);
+  const isWater = layer.kind === 'water';
+  const waterLimits = getWaterLayerSliderLimits(worldSettings);
+
   return (
     <div
       className={`layer-card ${active ? 'active' : ''} ${!layer.enabled ? 'disabled' : ''}`}
@@ -47,24 +56,71 @@ export function SceneLayerCard({
             >
               ×
             </button>
-            <img className="layer-thumb" src={layer.analysis?.preview || layer.url} alt="" />
+            <img className="layer-thumb" src={layer.url} alt="" />
           </div>
         )}
 
-        {layer.kind === 'water' && (
+        {isWater && (
           <>
-            <label>
-              Water effect
-              <select value={layer.mode || 'visual-only'} onChange={(e) => onChange({ mode: e.target.value })}>
-                <option value="visual-only">Visual only — no terrain change</option>
-                <option value="shallow-indent">Small indent for water bed</option>
-                <option value="riverbed">Riverbed / stream groove</option>
-                <option value="lake-flatten">Flatten calm lakes locally</option>
-                <option value="ocean-shore">Ocean shoreline shelf</option>
-              </select>
+            {mapSizePx?.width > 0 && (
+              <p className="small muted">
+                PNG aligned to {mapSizePx.width}×{mapSizePx.height}px
+                {mpp > 0 ? ` · ~${mpp.toFixed(1)} m/px` : ''}. Paint mask strokes anywhere — color is set below, not from the image.
+              </p>
+            )}
+            <label className="color-field">
+              Water color
+              <input
+                type="color"
+                value={layer.paintColor || DEFAULT_WATER_PAINT_COLOR}
+                onChange={(e) => onChange({ paintColor: e.target.value })}
+              />
             </label>
-            <Slider label="Indent depth" value={layer.carveDepthM ?? 1.5} min={0} max={12} step={0.1} suffix="m" onChange={(v) => onChange({ carveDepthM: v })} />
-            <Slider label="Bank softness" value={layer.bankSmoothPx ?? 14} min={0} max={90} step={1} suffix="px" onChange={(v) => onChange({ bankSmoothPx: v })} />
+            <Slider
+              label="Paint strength"
+              value={layer.paintStrength ?? 0.92}
+              min={0.2}
+              max={1}
+              step={0.02}
+              onChange={(v) => onChange({ paintStrength: v })}
+            />
+            <Slider
+              label="Mask sensitivity"
+              value={layer.maskThreshold ?? 8}
+              min={1}
+              max={64}
+              step={1}
+              onChange={(v) => onChange({ maskThreshold: v })}
+            />
+            <label className="checkline mini">
+              <input
+                type="checkbox"
+                checked={layer.lakeFlattenEnabled !== false}
+                onChange={(e) => onChange({ lakeFlattenEnabled: e.target.checked })}
+              />
+              Flatten lake beds on 3D mesh
+            </label>
+            {layer.lakeFlattenEnabled !== false && (
+              <>
+                <Slider
+                  label="Lake flatten amount"
+                  value={layer.lakeFlattenStrength ?? 0.55}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => onChange({ lakeFlattenStrength: v })}
+                />
+                <Slider
+                  label="Lake shelf depth"
+                  value={layer.lakeDepthM ?? 0.75}
+                  min={0.1}
+                  max={waterLimits.lakeDepthMax}
+                  step={0.1}
+                  suffix="m"
+                  onChange={(v) => onChange({ lakeDepthM: v })}
+                />
+              </>
+            )}
           </>
         )}
         {layer.kind === 'structure' && (
@@ -100,11 +156,13 @@ export function SceneLayerCard({
 
         {children}
 
-        <div className="actions compact">
-          <button type="button" onClick={onAnalyze}>Analyze layer</button>
-          {layer.analysis && <button type="button" onClick={onExport}>Export JSON</button>}
-        </div>
-        {layer.analysis && (
+        {!isWater && (
+          <div className="actions compact">
+            <button type="button" onClick={onAnalyze}>Analyze layer</button>
+            {layer.analysis && <button type="button" onClick={onExport}>Export JSON</button>}
+          </div>
+        )}
+        {!isWater && layer.analysis && (
           <p className="small muted">{layer.analysis.featureCount} feature(s).</p>
         )}
       </div>

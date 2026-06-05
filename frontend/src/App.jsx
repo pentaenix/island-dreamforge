@@ -9,6 +9,11 @@ import WaterSettingsPanel from './WaterSettingsPanel.jsx';
 import OceanLayerHeightControls from './OceanLayerHeightControls.jsx';
 import WaterDiscPreview from './WaterDiscPreview.jsx';
 import { buildWaterDiscPreview } from './waterDiscPreviewClient.js';
+import {
+  buildWaterLayerApiOptions,
+  createBlankWaterOverlayDataUrl,
+  getScaledWaterLayerDefaults,
+} from './waterOverlaySettings.js';
 import { Slider, CollapsibleSection } from './studioUi.jsx';
 import { API_URL, dataUrlToBlob, downloadBlob, postForm } from './api.js';
 import {
@@ -220,7 +225,9 @@ function newLayer(kind) {
     url: '',
     analysis: null,
   };
-  if (kind === 'water') return { ...base, mode: 'visual-only', carveDepthM: 1.5, lakeDepthM: 0.75, bankSmoothPx: 14, waterfallDropM: 18, fastRiverGrade: 0.25, maskThreshold: 8 };
+  if (kind === 'water') {
+    return { ...base, ...getScaledWaterLayerDefaults(DEFAULT_WORLD_SETTINGS, { width: 1024, height: 1024 }), paintStrength: 0.92 };
+  }
   if (kind === 'structure') return { ...base, shape: 'box', objectHeightM: 8, flattenGround: true, snapToGround: true, maskThreshold: 8 };
   if (kind === 'marker') return { ...base, markerType: 'poi', namePrefix: 'Point', radiusM: 4, maskThreshold: 8 };
   if (kind === 'flat') return { ...base, maskThreshold: 8, edgeSoftPx: 6, heightMode: 'median', flattenStrength: 0.72 };
@@ -903,8 +910,22 @@ export default function App() {
   }
 
   function addLayer(kind) {
-    const l = newLayer(kind);
-    setLayers(prev => [...prev, l]);
+    const l = kind === 'water'
+      ? { ...newLayer(kind), ...getScaledWaterLayerDefaults(worldSettings, mapSizePx) }
+      : newLayer(kind);
+    setLayers((prev) => [...prev, l]);
+    setActiveLayerId(l.id);
+  }
+
+  async function addBlankWaterOverlay() {
+    if (!mapSizePx?.width) return setError('Load a map in step 1 first so overlay size matches.');
+    const url = createBlankWaterOverlayDataUrl(mapSizePx);
+    const blob = await dataUrlToBlob(url);
+    const file = new File([blob], `water_overlay_${mapSizePx.width}x${mapSizePx.height}.png`, { type: 'image/png' });
+    const l = { ...newLayer('water'), ...getScaledWaterLayerDefaults(worldSettings, mapSizePx) };
+    l.file = file;
+    l.url = url;
+    setLayers((prev) => [...prev, l]);
     setActiveLayerId(l.id);
   }
 
@@ -925,7 +946,28 @@ export default function App() {
   async function setLayerFile(id, file) {
     if (!file) return;
     const url = await fileToDataUrl(file);
+    const isWater = layers.find((l) => l.id === id)?.kind === 'water';
     updateLayer(id, { file, url, analysis: null });
+    if (isWater) {
+      requestAnimationFrame(() => {
+        viewportRef.current?.syncRiverTexturePaint?.();
+      });
+    }
+  }
+
+  async function refreshRiversOn3d() {
+    if (!finalPreview) return setError('Generate step 1 heightmap first.');
+    if (stage !== 4) setStage(4);
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      if (viewportRef.current?.syncRiverTexturePaint) break;
+    }
+    const ok = await viewportRef.current?.syncRiverTexturePaint?.();
+    if (ok === false) {
+      setError('River overlay has no painted pixels — use opaque blue/cyan strokes or lower mask sensitivity, then try again.');
+    } else if (ok === true) {
+      setError('');
+    }
   }
 
   async function analyzeLayer(layer) {
@@ -936,7 +978,7 @@ export default function App() {
       form.append('layer_image', layer.file);
       if (finalHeight) form.append('heightmap', dataUrlToBlob(finalHeight), 'heightmap.png');
       form.append('kind', layer.kind);
-      form.append('options', JSON.stringify({ ...layer, maxHeightM: options.maxHeightM, terrainWidthM: 1480 }));
+      form.append('options', JSON.stringify(buildWaterLayerApiOptions(layer, worldSettings, mapSizePx, options.maxHeightM)));
       const data = await postForm('/api/analyze-layer', form);
       updateLayer(layer.id, { analysis: data });
     } catch (e) { setError(e.message); }
@@ -952,7 +994,10 @@ export default function App() {
       const form = new FormData();
       form.append('heightmap', dataUrlToBlob(source), 'heightmap.png');
       form.append('water_map', layer.file);
-      form.append('options', JSON.stringify({ maxHeightM: options.maxHeightM, mode: layer.mode || 'visual-only', seaLevelM: options.seaLevelM || 0, carveDepthM: layer.carveDepthM ?? 1.5, riverDepthM: layer.carveDepthM ?? 1.5, lakeDepthM: layer.lakeDepthM ?? 0.75, bankSmoothPx: layer.bankSmoothPx ?? 14, maskThreshold: layer.maskThreshold ?? 8 }));
+      form.append('options', JSON.stringify({
+        ...buildWaterLayerApiOptions(layer, worldSettings, mapSizePx, options.maxHeightM),
+        seaLevelM: options.seaLevelM || 0,
+      }));
       form.append('response_format', responseFormat);
       if (responseFormat === 'zip') {
         const blob = await postForm('/api/bake-water', form, true);
@@ -1234,7 +1279,7 @@ export default function App() {
       {stage === 3 && <section className="water-stage">
         <aside className="panel water-controls">
           <h2>3 · Water</h2>
-          <p className="muted">Ocean look (disc preview) and optional water masks that indent or flatten the baked height map.</p>
+          <p className="muted">Ocean tuning and river/lake texture overlays — rivers paint onto the island in Step 4.</p>
           <WaterSettingsPanel
             settings={exportSettings}
             setSettings={setExportSettings}
@@ -1246,9 +1291,16 @@ export default function App() {
           <div className="actions compact">
             <button type="button" className="primary" onClick={() => refreshWaterDiscPreview()}>Refresh preview</button>
           </div>
-          <h3>Water height overlays</h3>
-          <p className="small muted">Paint rivers/lakes on a PNG aligned with your map, then bake into the height map from step 1.</p>
-          <button type="button" onClick={() => addLayer('water')}>+ Water mask</button>
+          <h3>Rivers & lakes (texture paint)</h3>
+          <p className="small muted">
+            Upload or create a PNG aligned with your map ({mapSizePx.width ? `${mapSizePx.width}×${mapSizePx.height}px` : 'load step 1 first'}).
+            Paint rivers in blue or cyan — they show on the island in <b>Step 4</b> automatically. No bake step.
+          </p>
+          <div className="actions compact">
+            <button type="button" onClick={() => addLayer('water')}>+ Water mask</button>
+            <button type="button" onClick={() => addBlankWaterOverlay()} disabled={!mapSizePx.width}>New blank overlay (map size)</button>
+            <button type="button" className="primary" onClick={() => refreshRiversOn3d()} disabled={!layers.some((l) => l.kind === 'water' && l.url)}>Show rivers on 3D</button>
+          </div>
           <div className="layer-list compact-list">
             {layers.filter((l) => l.kind === 'water').map((layer) => (
               <SceneLayerCard
@@ -1258,19 +1310,13 @@ export default function App() {
                 onSelect={setActiveLayerId}
                 onChange={(patch) => updateLayer(layer.id, patch)}
                 onFile={(file) => setLayerFile(layer.id, file)}
-                onAnalyze={() => analyzeLayer(layer)}
-                onExport={() => exportLayerJson(layer)}
                 onDelete={() => deleteLayer(layer.id)}
                 onClear={() => clearLayer(layer.id)}
+                worldSettings={worldSettings}
+                mapSizePx={mapSizePx}
               />
             ))}
           </div>
-          {activeLayer?.kind === 'water' && activeLayer?.file && (
-            <div className="actions compact">
-              <button type="button" className="primary" onClick={() => bakeWaterLayer(activeLayer)}>Bake selected water mask</button>
-              <button type="button" onClick={() => { setBakedHeightmap16(''); setBakedPreview(''); setWaterMask(''); }}>Revert water bake</button>
-            </div>
-          )}
         </aside>
         <main className="panel water-preview-panel">
           <h2>Top-down disc</h2>
@@ -1285,7 +1331,7 @@ export default function App() {
           )}
           <div className="compare layer-compare water-bake-compare">
             <div><h4>Base height</h4>{heightPreview ? <img src={heightPreview} alt="" /> : <div className="drop-hint">Generate step 1 first</div>}</div>
-            <div><h4>After water bake</h4>{bakedPreview ? <img src={bakedPreview} alt="" /> : <div className="drop-hint">Bake a water mask to preview</div>}</div>
+            <div><h4>Overlay preview</h4>{activeLayer?.kind === 'water' && activeLayer?.url ? <img src={activeLayer.url} alt="" /> : <div className="drop-hint">Add a river overlay PNG</div>}</div>
           </div>
         </main>
       </section>}
@@ -1308,6 +1354,7 @@ export default function App() {
           <h3>Paint material</h3>
           <div className="material-list">{MATERIALS.map(m => <button key={m.id} title={MATERIAL_TOOLTIPS[m.id] || m.label} className={selectedMaterial === m.id ? 'active' : ''} onClick={() => { setSelectedMaterial(m.id); setTool('paint'); }}>{m.label}</button>)}</div>
           <button className="primary" onClick={() => viewportRef.current?.autoTexture()}>Regenerate terrain texture</button>
+          <button onClick={() => refreshRiversOn3d()} disabled={!layers.some((l) => l.kind === 'water' && l.url)}>Refresh rivers on texture</button>
           <button onClick={() => viewportRef.current?.regenerateTrees()}>Regenerate forest clumps</button>
           <button onClick={() => viewportRef.current?.resetCamera()}>Reset camera</button>
           <div className="tool-grid">
@@ -1335,6 +1382,8 @@ export default function App() {
                 onExport={() => exportLayerJson(layer)}
                 onDelete={() => deleteLayer(layer.id)}
                 onClear={() => clearLayer(layer.id)}
+                worldSettings={worldSettings}
+                mapSizePx={mapSizePx}
               />
             ))}
           </div>

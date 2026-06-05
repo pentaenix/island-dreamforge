@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from .image_utils import hex_to_rgb, pil_to_rgb_array, rgb_to_hex
+from .water_world_scale import bank_smooth_px_from_options
 
 
 @dataclass
@@ -900,7 +901,7 @@ def bake_water_layer(
     river_depth = max(0.0, float(options.get("riverDepthM", options.get("carveDepthM", 1.5)) or 1.5))
     lake_depth = max(0.0, float(options.get("lakeDepthM", 0.75) or 0.75))
     carve_depth = max(0.0, float(options.get("carveDepthM", river_depth) or river_depth))
-    bank_width = int(max(0, options.get("bankSmoothPx", 14) or 14))
+    bank_width = bank_smooth_px_from_options(options, baked.shape)
     mode = str(options.get("mode", "visual-only") or "visual-only").lower()
     changed_pixels = int(np.count_nonzero(water_mask))
 

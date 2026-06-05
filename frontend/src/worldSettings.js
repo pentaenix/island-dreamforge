@@ -127,7 +127,7 @@ export function getOceanDiscRadiusM(worldSettings, mapSizePx = {}, oceanSettings
 
 /** Max shore distance used when encoding shore-distance preview maps (m). */
 export function maxShoreDistanceScaleM(worldSettings, mapSizePx = {}, oceanSettings = {}) {
-  const edges = defaultBandEdgesM(oceanSettings);
+  const edges = defaultBandEdgesM(oceanSettings, worldSettings);
   const oceanR = getWaterMapRadiusM(worldSettings, mapSizePx, oceanSettings);
   return Math.max(1, oceanR, edges[edges.length - 1] || 1);
 }
@@ -135,7 +135,7 @@ export function maxShoreDistanceScaleM(worldSettings, mapSizePx = {}, oceanSetti
 /** Auto radius for bathymetry / derived band maps — generous vs island footprint. */
 export function getAutoWaterMapRadiusM(worldSettings, mapSizePx = {}, exportSettings = {}) {
   const footprint = getOceanFootprintRadiusM(worldSettings, mapSizePx);
-  const bandReach = totalBandReachM(exportSettings);
+  const bandReach = totalBandReachM(exportSettings, worldSettings);
   const span = Math.max(
     Number(worldSettings?.widthM ?? DEFAULT_WORLD_SETTINGS.widthM),
     getDerivedDepthM(worldSettings, mapSizePx),

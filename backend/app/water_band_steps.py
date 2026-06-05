@@ -6,6 +6,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from .water_world_scale import island_horizon_scale, scale_water_design_meters
+
 NUM_WATER_BANDS = 6
 
 
@@ -42,15 +44,16 @@ def band_edges_from_steps(
 def band_edges_from_options(opts: Dict[str, Any]) -> List[float]:
     custom = opts.get("waterBandEdgesM")
     if isinstance(custom, (list, tuple)) and len(custom) >= 2:
-        edges = [max(0.0, float(v)) for v in custom]
+        scale = island_horizon_scale(opts)
+        edges = [max(0.0, float(v) * scale) for v in custom]
         edges.sort()
         for i in range(1, len(edges)):
             if edges[i] <= edges[i - 1]:
                 edges[i] = edges[i - 1] + 1.0
         return edges
 
-    base = _read_float(opts, "waterBandStepM", 12.0, minimum=1.0)
-    inc = _read_float(opts, "waterBandStepIncreaseM", 8.0, minimum=0.0)
+    base = scale_water_design_meters(_read_float(opts, "waterBandStepM", 12.0, minimum=1.0), opts)
+    inc = scale_water_design_meters(_read_float(opts, "waterBandStepIncreaseM", 8.0, minimum=0.0), opts)
     power = _read_float(opts, "waterBandStepGrowthPower", 2.0, minimum=1.0)
     return band_edges_from_steps(base, inc, growth_power=power)
 

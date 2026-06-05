@@ -60,7 +60,7 @@ export default function WorldScalePanel({
     <div className="world-scale-box" aria-label="Island world scale">
       <h4>Island world scale</h4>
       <p className="small muted world-scale-lede">
-        Sets real-world land footprint and scales terrain elevation with island width (author heights at resort scale; massive islands get proportionally taller peaks). The ocean disc auto-grows to match unless you override it in Water. Trees and future paths/buildings keep fixed meter sizes.
+        Sets real-world land footprint and scales terrain elevation with island width (author heights at resort scale; massive islands get proportionally taller peaks). Water band/foam/wave distances scale the same way — sliders stay at design values (~1.5 km reference). Trees and future paths/buildings keep fixed meter sizes for now.
       </p>
 
       <div className="world-scale-section">

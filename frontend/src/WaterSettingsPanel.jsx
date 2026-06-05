@@ -1,6 +1,6 @@
 import React from 'react';
 import { Slider } from './studioUi.jsx';
-import { bandWidthsM, defaultBandEdgesM, ISLAND_WATER_HEX, NUM_WATER_BANDS } from './waterPalette.js';
+import { defaultBandEdgesM, ISLAND_WATER_HEX, NUM_WATER_BANDS } from './waterPalette.js';
 import {
   getAutoOceanDiscRadiusM,
   getAutoWaterMapRadiusM,
@@ -46,13 +46,16 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
   const bandStepM = Number(settings.waterBandStepM ?? 12);
   const bandStepInc = Number(settings.waterBandStepIncreaseM ?? 16);
   const bandGrowthPower = Number(settings.waterBandStepGrowthPower ?? 2);
-  const bandEdges = defaultBandEdgesM({
-    waterBandStepM: bandStepM,
-    waterBandStepIncreaseM: bandStepInc,
-    waterBandStepGrowthPower: bandGrowthPower,
-  });
+  const bandEdges = defaultBandEdgesM(
+    {
+      waterBandStepM: bandStepM,
+      waterBandStepIncreaseM: bandStepInc,
+      waterBandStepGrowthPower: bandGrowthPower,
+    },
+    worldSettings,
+  );
   const totalBandReachM = Math.round(bandEdges[bandEdges.length - 1] || 0);
-  const bandWidths = bandWidthsM(bandStepM, bandStepInc, NUM_WATER_BANDS, bandGrowthPower);
+  const bandWidthsDisplay = bandEdges.slice(1).map((edge, i) => Math.round(edge - bandEdges[i]));
 
   return (
     <div className="water-settings-panel">
@@ -128,7 +131,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
 
       <h4>Depth bands (from shore)</h4>
       <p className="small muted">
-        Each band width = shore step + increase × band² (outer bands grow much wider). Island maps refresh automatically on this tab; 3D uses the latest derived maps on step 4.
+        Each band width = shore step + increase × band² (outer bands grow much wider). Values scale with island width — shown widths are world meters on your map.
       </p>
       <Slider
         label="First band width (shore)"
@@ -149,7 +152,7 @@ export default function WaterSettingsPanel({ settings, setSettings, autoOceanRad
         onChange={(v) => patch({ waterBandStepIncreaseM: v })}
       />
       <p className="small muted">
-        Band widths (m): {bandWidths.map((w) => Math.round(w)).join(' → ')} · total reach ~{totalBandReachM} m
+        Band widths (m): {bandWidthsDisplay.join(' → ')} · total reach ~{totalBandReachM} m
       </p>
       <Slider
         label="Band transition smoothness"

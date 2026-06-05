@@ -174,7 +174,7 @@ export async function buildWaterBandsMapUrl({
   const smooth = Math.max(0, Math.min(1, Number(bandSmoothness) || 0));
   const maxH = getWorldMaxHeightM(maxHeightM, worldSettings);
   const mapSizePx = { width: cols, height: rows };
-  const edges = defaultBandEdgesM(oceanSettings);
+  const edges = defaultBandEdgesM(oceanSettings, worldSettings);
   const maxDistM = Number(shoreDistanceMaxM) > 0
     ? Number(shoreDistanceMaxM)
     : maxShoreDistanceScaleM(worldSettings, mapSizePx, oceanSettings);
