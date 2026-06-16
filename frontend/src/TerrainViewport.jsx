@@ -21,13 +21,13 @@ import { isLandVertexM } from './waterMaskFromHeights.js';
 import {
   applyWaterOverlayPaintToImageData,
   buildCombinedWaterOverlayMask,
-  buildHeightmapWaterMask,
+  buildCombinedWaterOverlayCarveMask,
   buildWaterOverlayPaintLayers,
   countMaskPixels,
   hexToRgb,
 } from './riverTexturePaint.js';
-import { aggregateLakeFlattenSettings } from './waterOverlaySettings.js';
-import { applyLakeFlattenToHeights } from './waterLakeFlatten.js';
+import { applyRiverSandBanksToImageData } from './riverSandBanks.js';
+import { aggregateRiverOverlaySettings } from './waterOverlaySettings.js';
 import { exportViewportSceneGlb } from './viewportSceneExport.js';
 import { dataUrlToBlob } from './api.js';
 
@@ -137,11 +137,6 @@ function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function smoothstep(a, b, x) { const t = clamp((x - a) / Math.max(1e-6, b - a), 0, 1); return t * t * (3 - 2 * t); }
 function mix(a, b, t) { return a * (1 - t) + b * t; }
 function mixRgb(a, b, t) { return [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)]; }
-function hexToRgb(hex, fallback = [45, 183, 217]) {
-  const v = String(hex || '').replace('#', '');
-  if (v.length !== 6) return fallback;
-  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
-}
 function hashNoise(x, y, seed = 0) {
   const n = Math.sin((x * 127.1 + y * 311.7 + seed * 74.7)) * 43758.5453;
   return n - Math.floor(n);
@@ -403,7 +398,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     patterns: {}, isPainting: false,
     raycaster: new THREE.Raycaster(), pointer: new THREE.Vector2(),
     water: null, waterNormals: null, waterOverlayMaskGrid: null, waterOverlayMaskKey: '',
-    waterOverlayPaintLayers: [], waterHeightmapMask: null, waterOverlayDims: null, heightsSource: null,
+    waterOverlayPaintLayers: [], heightsSource: null,
     skybox: null, viewportConfig: null, seafloor: null, coastlineSkirt: null,
     patternTextures: {}, overlayGroup: null, vegetationGroup: null, brushRing: null,
     sceneBounds: null,
@@ -1104,8 +1099,10 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     });
 
     const img = painted.color;
+    const waterMaskForPreserve = s.waterOverlayMaskGrid;
     if (previous) {
       for (let p = 0; p < img.data.length; p += 4) {
+        if (waterMaskForPreserve?.length && waterMaskForPreserve[(p / 4) | 0] > 32) continue;
         if (previous.data[p + 3] > 0 && img.data[p + 3] > 0) {
           const keep = 0.35;
           img.data[p] = Math.round(img.data[p] * (1 - keep) + previous.data[p] * keep);
@@ -1126,6 +1123,32 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       }
     }
 
+    const riverOverlay = aggregateRiverOverlaySettings(
+      propsRef.current.layers || [],
+      world,
+      { width: s.cols, height: s.rows },
+      s.cols,
+      size,
+    );
+    const sandMask = s.waterOverlaySandMaskGrid || s.waterOverlayMaskGrid;
+    if (riverOverlay.sandBankAmount > 0 && sandMask?.length) {
+      const bankTexPx = riverOverlay.sandBankTexPx || riverOverlay.sandBankPx;
+      const sampleSand = useProceduralOnly
+        ? null
+        : (id, u, v) => {
+          const key = id === 'wet_sand' ? 'wet_sand' : 'sand';
+          const entry = pat[key] || pat.sand;
+          if (!entry) return id === 'wet_sand' ? [186, 169, 128] : [226, 207, 146];
+          return samplePattern(entry, u, v);
+        };
+      applyRiverSandBanksToImageData(img, sandMask, size, size, {
+        strength: riverOverlay.sandStrength,
+        bankRadiusPx: Math.max(2, bankTexPx),
+        sampleSand,
+        wetInnerPx: Math.max(2, Math.round(bankTexPx * 0.35)),
+      });
+    }
+
     ctx.putImageData(img, 0, 0);
     nctx.putImageData(painted.normal, 0, 0);
     if (s.texture) s.texture.needsUpdate = true;
@@ -1137,6 +1160,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     if (!s.textureCanvas || !s.rows) {
       s.waterOverlayMaskGrid = null;
       s.waterOverlayMaskPixelCount = 0;
+      s.waterOverlayPaintLayers = [];
       return;
     }
     const size = s.textureCanvas.width;
@@ -1152,21 +1176,20 @@ const TerrainViewport = forwardRef(function TerrainViewport({
           enabled: l.enabled,
           maskThreshold: l.maskThreshold,
           paintStrength: l.paintStrength,
+          paintColor: l.paintColor,
+          maskSmoothPx: l.maskSmoothPx,
+          riverSlimPx: l.riverSlimPx,
+          sandBankAmount: l.sandBankAmount,
         })),
     });
     if (s.waterOverlayMaskKey === key && s.waterOverlayMaskGrid) return;
     s.waterOverlayMaskKey = key;
-    s.waterOverlayMaskGrid = await buildCombinedWaterOverlayMask(
-      layers,
-      size,
-      size,
-      s.rows,
-      s.cols,
-    );
-    s.waterOverlayPaintStrength = aggregateWaterPaintStrength(layers);
+    s.waterOverlayPaintLayers = await buildWaterOverlayPaintLayers(layers, size, size, s.rows, s.cols);
+    s.waterOverlayMaskGrid = await buildCombinedWaterOverlayMask(layers, size, size, s.rows, s.cols);
+    s.waterOverlaySandMaskGrid = await buildCombinedWaterOverlayCarveMask(layers, size, size, s.rows, s.cols);
     s.waterOverlayMaskPixelCount = countMaskPixels(s.waterOverlayMaskGrid);
     if (s.waterOverlayMaskPixelCount === 0 && layers.some((l) => l.kind === 'water' && l.enabled !== false && l.url)) {
-      console.warn('[rivers] Overlay loaded but no painted pixels matched — use opaque blue/cyan strokes or lower mask sensitivity.');
+      console.warn('[rivers] Overlay loaded but no painted pixels matched — use opaque strokes or lower mask sensitivity.');
     }
   }
 

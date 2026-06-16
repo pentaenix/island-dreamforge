@@ -8,6 +8,8 @@ import ExportProfilePanel from './ExportProfilePanel.jsx';
 import WaterSettingsPanel from './WaterSettingsPanel.jsx';
 import OceanLayerHeightControls from './OceanLayerHeightControls.jsx';
 import WaterDiscPreview from './WaterDiscPreview.jsx';
+import InlandWaterHeightPanel from './InlandWaterHeightPanel.jsx';
+import { runInlandWaterPipeline, inlandWaterAutoApplyKey } from './inlandWaterPipeline.js';
 import { buildWaterDiscPreview } from './waterDiscPreviewClient.js';
 import {
   buildWaterLayerApiOptions,
@@ -226,7 +228,7 @@ function newLayer(kind) {
     analysis: null,
   };
   if (kind === 'water') {
-    return { ...base, ...getScaledWaterLayerDefaults(DEFAULT_WORLD_SETTINGS, { width: 1024, height: 1024 }), paintStrength: 0.92 };
+    return { ...base, ...getScaledWaterLayerDefaults(DEFAULT_WORLD_SETTINGS, { width: 1024, height: 1024 }), paintStrength: 1 };
   }
   if (kind === 'structure') return { ...base, shape: 'box', objectHeightM: 8, flattenGround: true, snapToGround: true, maskThreshold: 8 };
   if (kind === 'marker') return { ...base, markerType: 'poi', namePrefix: 'Point', radiusM: 4, maskThreshold: 8 };
@@ -295,12 +297,19 @@ export default function App() {
   const [analyzeCount, setAnalyzeCount] = useState(12);
   const [worldSettings, setWorldSettings] = useState(DEFAULT_WORLD_SETTINGS);
   const [mapSizePx, setMapSizePx] = useState({ width: 0, height: 0 });
+  const [inlandWaterHeightPreview, setInlandWaterHeightPreview] = useState('');
+  const [inlandWaterApplied, setInlandWaterApplied] = useState(false);
+  const [inlandWaterFeatures, setInlandWaterFeatures] = useState([]);
+  const [inlandWaterPipelineBusy, setInlandWaterPipelineBusy] = useState(false);
+  const [inlandWaterPanelPreview, setInlandWaterPanelPreview] = useState(null);
 
   const finalPreview = bakedPreview || heightPreview;
+  const viewportHeightPreview = inlandWaterHeightPreview || finalPreview;
   const finalHeight = bakedHeightmap16 || heightmap16;
   const activeLayer = layers.find(l => l.id === activeLayerId) || layers[0] || null;
   const derivedDepthM = getDerivedDepthM(worldSettings, mapSizePx);
   const metersPerPixel = getMetersPerPixel(worldSettings, mapSizePx);
+  const inlandWaterAutoKey = useMemo(() => inlandWaterAutoApplyKey(layers), [layers]);
 
   const currentHeightFingerprint = useMemo(
     () => buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius, layers }),
@@ -903,6 +912,7 @@ export default function App() {
         setHeightPreview(data.preview8);
         setHeightGenFingerprint(buildHeightGenFingerprint({ mapUrl, samples, options, similarRadius, layers }));
         setBakedHeightmap16(''); setBakedPreview('');
+        setInlandWaterHeightPreview(''); setInlandWaterApplied(false); setInlandWaterFeatures([]);
         if (data.warning) setError(data.warning);
       }
     } catch (e) { setError(e.message); }
@@ -953,6 +963,20 @@ export default function App() {
         viewportRef.current?.syncRiverTexturePaint?.();
       });
     }
+  }
+
+  function syncWaterProc(key, value) {
+    const layerKey = {
+      riverMaskSmoothPx: 'maskSmoothPx',
+      riverCarveDepthM: 'carveDepthM',
+    }[key] || key;
+    setLayers((prev) => prev.map((l) => (
+      l.kind === 'water' ? { ...l, [layerKey]: value } : l
+    )));
+  }
+
+  function syncWaterMaskSmooth(px) {
+    syncWaterProc('riverMaskSmoothPx', px);
   }
 
   async function refreshRiversOn3d() {
@@ -1128,6 +1152,77 @@ export default function App() {
   }, [stage, waterPreviewKey]);
 
   React.useEffect(() => {
+    const waterActive = layers.some((l) => l.kind === 'water' && l.enabled !== false && l.url);
+    if (!finalPreview || !waterActive) {
+      setInlandWaterHeightPreview('');
+      setInlandWaterApplied(false);
+      setInlandWaterFeatures([]);
+      setInlandWaterPanelPreview(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setInlandWaterPipelineBusy(true);
+    (async () => {
+      try {
+        const out = await runInlandWaterPipeline({
+          heightPreviewUrl: finalPreview,
+          layers,
+          worldSettings,
+          mapSizePx,
+          maxHeightM: options.maxHeightM,
+          seaLevelM: options.seaLevelM ?? waterSettings.seaLevelM ?? 0,
+          textureSettings,
+        });
+        if (cancelled) return;
+        if (!out?.processedPreviewUrl) {
+          setInlandWaterHeightPreview('');
+          setInlandWaterApplied(false);
+          setInlandWaterFeatures([]);
+          setInlandWaterPanelPreview(null);
+          return;
+        }
+        setInlandWaterHeightPreview(out.processedPreviewUrl);
+        setInlandWaterApplied(true);
+        setInlandWaterFeatures(out.waterfalls || []);
+        setInlandWaterPanelPreview(out);
+      } catch (e) {
+        if (!cancelled) console.warn('Inland water pipeline failed', e);
+      } finally {
+        if (!cancelled) setInlandWaterPipelineBusy(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [
+    finalPreview,
+    inlandWaterAutoKey,
+    layers,
+    worldSettings,
+    mapSizePx,
+    options.maxHeightM,
+    options.seaLevelM,
+    waterSettings.seaLevelM,
+    textureSettings,
+  ]);
+
+  React.useEffect(() => {
+    if (stage !== 4) return undefined;
+    let cancelled = false;
+    (async () => {
+      for (let i = 0; i < 40; i++) {
+        if (cancelled) return;
+        await new Promise((r) => requestAnimationFrame(r));
+        if (viewportRef.current?.syncRiverTexturePaint) {
+          await viewportRef.current.syncRiverTexturePaint();
+          break;
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [stage, inlandWaterHeightPreview, inlandWaterAutoKey]);
+
+  React.useEffect(() => {
     syncOceanLayerHeights(exportSettings);
   }, [
     syncOceanLayerHeights,
@@ -1279,7 +1374,7 @@ export default function App() {
       {stage === 3 && <section className="water-stage">
         <aside className="panel water-controls">
           <h2>3 · Water</h2>
-          <p className="muted">Ocean tuning and river/lake texture overlays — rivers paint onto the island in Step 4.</p>
+          <p className="muted">Ocean tuning, river/lake overlays, and height shaping before the 3D view.</p>
           <WaterSettingsPanel
             settings={exportSettings}
             setSettings={setExportSettings}
@@ -1294,18 +1389,19 @@ export default function App() {
           <h3>Rivers & lakes (texture paint)</h3>
           <p className="small muted">
             Upload or create a PNG aligned with your map ({mapSizePx.width ? `${mapSizePx.width}×${mapSizePx.height}px` : 'load step 1 first'}).
-            Paint rivers in blue or cyan — they show on the island in <b>Step 4</b> automatically. No bake step.
+            Paint mask strokes on the overlay — pick water color below. Shape lakes, rivers, and sand in <b>Inland shaping</b> below, then open <b>Step 4</b>.
           </p>
           <div className="actions compact">
             <button type="button" onClick={() => addLayer('water')}>+ Water mask</button>
             <button type="button" onClick={() => addBlankWaterOverlay()} disabled={!mapSizePx.width}>New blank overlay (map size)</button>
             <button type="button" className="primary" onClick={() => refreshRiversOn3d()} disabled={!layers.some((l) => l.kind === 'water' && l.url)}>Show rivers on 3D</button>
           </div>
-          <div className="layer-list compact-list">
+          <div className="water-layer-sections">
             {layers.filter((l) => l.kind === 'water').map((layer) => (
               <SceneLayerCard
                 key={layer.id}
                 layer={layer}
+                variant="section"
                 active={activeLayer?.id === layer.id}
                 onSelect={setActiveLayerId}
                 onChange={(patch) => updateLayer(layer.id, patch)}
@@ -1317,6 +1413,18 @@ export default function App() {
               />
             ))}
           </div>
+          <InlandWaterHeightPanel
+            embedded
+            layers={layers}
+            worldSettings={worldSettings}
+            mapSizePx={mapSizePx}
+            maxHeightM={options.maxHeightM}
+            applied={inlandWaterApplied}
+            busy={inlandWaterPipelineBusy}
+            pipelinePreview={inlandWaterPanelPreview}
+            onProcPatch={syncWaterProc}
+            onMaskSmoothChange={syncWaterMaskSmooth}
+          />
         </aside>
         <main className="panel water-preview-panel">
           <h2>Top-down disc</h2>
@@ -1332,6 +1440,14 @@ export default function App() {
           <div className="compare layer-compare water-bake-compare">
             <div><h4>Base height</h4>{heightPreview ? <img src={heightPreview} alt="" /> : <div className="drop-hint">Generate step 1 first</div>}</div>
             <div><h4>Overlay preview</h4>{activeLayer?.kind === 'water' && activeLayer?.url ? <img src={activeLayer.url} alt="" /> : <div className="drop-hint">Add a river overlay PNG</div>}</div>
+            <div>
+              <h4>Carved height</h4>
+              {inlandWaterPanelPreview?.processedPreviewUrl ? (
+                <img src={inlandWaterPanelPreview.processedPreviewUrl} alt="Processed height with inland water" />
+              ) : (
+                <div className="drop-hint">{layers.some((l) => l.kind === 'water' && l.url) ? 'Processing…' : 'Add water overlay'}</div>
+              )}
+            </div>
           </div>
         </main>
       </section>}
@@ -1420,7 +1536,7 @@ export default function App() {
           />
         </aside>
         <div className="viewer-wrap">
-          {finalPreview ? <TerrainViewport ref={viewportRef} heightUrl={finalPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} shoreDistanceUrl={derivedMaps?.shoreDistancePreview || ''} shoreDistanceMaxM={maxShoreDistanceScaleM(worldSettings, mapSizePx, exportSettings)} foamMaskUrl={derivedMaps?.foamMask || ''} waterMaskUrl={derivedMaps?.waterMask || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
+          {viewportHeightPreview ? <TerrainViewport ref={viewportRef} heightUrl={viewportHeightPreview} maxHeightM={options.maxHeightM} seaLevelM={options.seaLevelM ?? waterSettings.seaLevelM ?? 0} tool={tool} brush={brush} selectedMaterial={selectedMaterial} textureSettings={textureSettings} layers={layers} worldSettings={{ ...worldSettings, depthM: derivedDepthM }} waterDepthUrl={derivedMaps?.waterDepth || ''} waterColorUrl={derivedMaps?.waterColor || ''} shoreDistanceUrl={derivedMaps?.shoreDistancePreview || ''} shoreDistanceMaxM={maxShoreDistanceScaleM(worldSettings, mapSizePx, exportSettings)} foamMaskUrl={derivedMaps?.foamMask || ''} waterMaskUrl={derivedMaps?.waterMask || ''} islandMaskUrl={derivedMaps?.islandMask || ''} materialPreviewUrl={derivedMaps?.materialIds || ''} showSeafloor={!!exportSettings.showSeafloorPreview} oceanSettings={exportSettings} /> : <div className="drop-hint big">Generate Stage 1 first, then the 3D viewport appears here.</div>}
         </div>
       </section>}
     </div>

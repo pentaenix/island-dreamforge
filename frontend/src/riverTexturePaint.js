@@ -4,6 +4,7 @@
  */
 
 import { ISLAND_WATER_HEX } from './waterPalette.js';
+import { smoothMaskGridMulti, erodeMaskGridMulti } from './maskSmooth.js';
 
 export const DEFAULT_WATER_PAINT_COLOR = ISLAND_WATER_HEX[2] || '#2DA8C1';
 
@@ -37,11 +38,73 @@ async function loadLayerOverlayData(layer) {
   return { data: ctx.getImageData(0, 0, overlayW, overlayH).data, overlayW, overlayH };
 }
 
-function overlaySampleIsWater(data, overlayW, overlayH, row, col, rows, cols, threshold) {
-  const oy = Math.min(overlayH - 1, Math.round((row / Math.max(1, rows - 1)) * (overlayH - 1)));
-  const ox = Math.min(overlayW - 1, Math.round((col / Math.max(1, cols - 1)) * (overlayW - 1)));
-  const op = (oy * overlayW + ox) * 4;
-  return overlayPixelIsWater(data, op, threshold);
+/** Fraction of overlay taps that read as water [0,1] — softens blocky PNG strokes. */
+function overlaySampleCoverageAt(data, overlayW, overlayH, ox, oy, threshold, tapRadius = 1.5) {
+  const r = Math.ceil(tapRadius);
+  let sum = 0;
+  let n = 0;
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const sx = Math.min(overlayW - 1, Math.max(0, Math.round(ox + dx)));
+      const sy = Math.min(overlayH - 1, Math.max(0, Math.round(oy + dy)));
+      const op = (sy * overlayW + sx) * 4;
+      sum += overlayPixelIsWater(data, op, threshold) ? 1 : 0;
+      n++;
+    }
+  }
+  return n > 0 ? sum / n : 0;
+}
+
+/** Build grayscale mask by mapping grid UV directly onto overlay (not binary point samples). */
+function fillWaterMaskFromOverlay(mask, maskW, maskH, data, overlayW, overlayH, threshold) {
+  const tap = Math.max(1, Math.round(Math.max(overlayW, overlayH) / Math.max(maskW, maskH, 1)));
+  for (let y = 0; y < maskH; y++) {
+    const oy = (y / Math.max(1, maskH - 1)) * (overlayH - 1);
+    for (let x = 0; x < maskW; x++) {
+      const ox = (x / Math.max(1, maskW - 1)) * (overlayW - 1);
+      const cov = overlaySampleCoverageAt(data, overlayW, overlayH, ox, oy, threshold, tap * 0.65 + 1);
+      mask[y * maskW + x] = Math.round(cov * 255);
+    }
+  }
+}
+
+function smoothPassesForRadius(r) {
+  if (r >= 8) return 3;
+  if (r >= 4) return 2;
+  return 1;
+}
+
+/** Scale blur radius so texture-resolution masks get similar world-space softness as height grid. */
+function effectiveSmoothRadius(basePx, gridW, overlayW) {
+  const b = Math.max(0, Number(basePx) || 0);
+  if (b < 1) return 0;
+  const scale = Math.max(1, Number(overlayW) || gridW) / Math.max(1, gridW);
+  return Math.max(1, Math.round(b * Math.sqrt(scale)));
+}
+
+function applyMaskSmooth(mask, gridH, gridW, baseSmoothPx, overlayW) {
+  const radius = effectiveSmoothRadius(baseSmoothPx, gridW, overlayW);
+  if (radius < 1) return mask;
+  return smoothMaskGridMulti(mask, gridH, gridW, radius, smoothPassesForRadius(radius));
+}
+
+function applyRiverSlim(mask, gridH, gridW, slimPx) {
+  const s = Math.round(Number(slimPx) || 0);
+  if (s < 1) return mask;
+  return erodeMaskGridMulti(mask, gridH, gridW, 1, s);
+}
+
+export function aggregateRiverSlimPx(waterLayers = []) {
+  const active = (waterLayers || []).filter((l) => l.kind === 'water' && l.enabled !== false);
+  return active.length ? Math.max(...active.map((l) => Number(l.riverSlimPx ?? 0))) : 0;
+}
+
+export function aggregateMaskSmoothPx(waterLayers = [], extraSmoothPx = 0) {
+  const active = (waterLayers || []).filter((l) => l.kind === 'water' && l.enabled !== false);
+  const fromLayers = active.length
+    ? Math.max(...active.map((l) => Number(l.maskSmoothPx ?? 0)))
+    : 0;
+  return Math.max(fromLayers, Number(extraSmoothPx) || 0);
 }
 
 export function hexToRgb(hex, fallback = [45, 168, 193]) {
@@ -54,10 +117,10 @@ export function hexToRgb(hex, fallback = [45, 168, 193]) {
   ];
 }
 
-/** Build a single-layer mask at texture resolution. */
+/** Build a single-layer mask at texture resolution (used for blue water color on 3D). */
 export async function buildWaterOverlayMaskForLayer(layer, texW, texH, rows, cols, threshold = 8) {
   const mask = new Uint8Array(texW * texH);
-  if (!layer?.url || texW < 1 || texH < 1 || rows < 2 || cols < 2) return mask;
+  if (!layer?.url || texW < 1 || texH < 1) return mask;
 
   const t = Number(layer.maskThreshold ?? threshold);
   let overlay;
@@ -68,16 +131,48 @@ export async function buildWaterOverlayMaskForLayer(layer, texW, texH, rows, col
   }
   const { data, overlayW, overlayH } = overlay;
 
-  for (let ty = 0; ty < texH; ty++) {
-    const row = Math.min(rows - 1, Math.round((ty / Math.max(1, texH - 1)) * (rows - 1)));
-    for (let tx = 0; tx < texW; tx++) {
-      const col = Math.min(cols - 1, Math.round((tx / Math.max(1, texW - 1)) * (cols - 1)));
-      if (overlaySampleIsWater(data, overlayW, overlayH, row, col, rows, cols, t)) {
-        mask[ty * texW + tx] = 255;
-      }
+  fillWaterMaskFromOverlay(mask, texW, texH, data, overlayW, overlayH, t);
+  let out = applyMaskSmooth(mask, texH, texW, layer.maskSmoothPx ?? 3, overlayW);
+  out = applyRiverSlim(out, texH, texW, layer.riverSlimPx ?? 0);
+  return out;
+}
+
+/** Smoothed mask without slim — for sand banks that should hug the full water fringe. */
+export async function buildWaterOverlayCarveMaskForLayer(layer, texW, texH, rows, cols, threshold = 8) {
+  const mask = new Uint8Array(texW * texH);
+  if (!layer?.url || texW < 1 || texH < 1) return mask;
+
+  const t = Number(layer.maskThreshold ?? threshold);
+  let overlay;
+  try {
+    overlay = await loadLayerOverlayData(layer);
+  } catch {
+    return mask;
+  }
+  const { data, overlayW, overlayH } = overlay;
+  fillWaterMaskFromOverlay(mask, texW, texH, data, overlayW, overlayH, t);
+  return applyMaskSmooth(mask, texH, texW, layer.maskSmoothPx ?? 3, overlayW);
+}
+
+export async function buildCombinedWaterOverlayCarveMask(
+  waterLayers,
+  texW,
+  texH,
+  rows,
+  cols,
+  threshold = 8,
+) {
+  const combined = new Uint8Array(texW * texH);
+  const active = (waterLayers || []).filter((l) => l.kind === 'water' && l.enabled !== false && l.url);
+  if (!active.length || texW < 1 || texH < 1) return combined;
+
+  for (const layer of active) {
+    const layerMask = await buildWaterOverlayCarveMaskForLayer(layer, texW, texH, rows, cols, threshold);
+    for (let i = 0; i < combined.length; i++) {
+      combined[i] = Math.max(combined[i], layerMask[i]);
     }
   }
-  return mask;
+  return combined;
 }
 
 /**
@@ -93,23 +188,23 @@ export async function buildCombinedWaterOverlayMask(
 ) {
   const combined = new Uint8Array(texW * texH);
   const active = (waterLayers || []).filter((l) => l.kind === 'water' && l.enabled !== false && l.url);
-  if (!active.length || texW < 1 || texH < 1 || rows < 2 || cols < 2) return combined;
+  if (!active.length || texW < 1 || texH < 1) return combined;
 
   for (const layer of active) {
     const layerMask = await buildWaterOverlayMaskForLayer(layer, texW, texH, rows, cols, threshold);
     for (let i = 0; i < combined.length; i++) {
-      if (layerMask[i] > 32) combined[i] = 255;
+      combined[i] = Math.max(combined[i], layerMask[i]);
     }
   }
   return combined;
 }
 
-/** Heightmap-resolution mask for lake flattening. */
-export async function buildHeightmapWaterMask(waterLayers, rows, cols, threshold = 8) {
+/** Heightmap-resolution mask for lake flatten / river carve (Step 3 height panel). */
+export async function buildHeightmapWaterMask(waterLayers, rows, cols, threshold = 8, smoothRadius = 0) {
   const combined = new Uint8Array(rows * cols);
   const active = (waterLayers || []).filter((l) => l.kind === 'water' && l.enabled !== false && l.url);
   if (!active.length || rows < 2 || cols < 2) {
-    return { mask: combined, overlayW: cols, overlayH: rows };
+    return { mask: combined, carveMask: combined, classifyMask: combined, overlayW: cols, overlayH: rows };
   }
 
   let overlayW = cols;
@@ -125,20 +220,22 @@ export async function buildHeightmapWaterMask(waterLayers, rows, cols, threshold
     }
     overlayW = overlay.overlayW;
     overlayH = overlay.overlayH;
-    const { data } = overlay;
-
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        if (overlaySampleIsWater(data, overlayW, overlayH, r, c, rows, cols, t)) {
-          combined[r * cols + c] = 255;
-        }
-      }
+    const layerMask = new Uint8Array(rows * cols);
+    fillWaterMaskFromOverlay(layerMask, cols, rows, overlay.data, overlayW, overlayH, t);
+    for (let i = 0; i < combined.length; i++) {
+      combined[i] = Math.max(combined[i], layerMask[i]);
     }
   }
-  return { mask: combined, overlayW, overlayH };
+
+  const smoothPx = aggregateMaskSmoothPx(active, smoothRadius);
+  const classifyMask = combined;
+  const carveMask = applyMaskSmooth(combined, rows, cols, smoothPx, overlayW);
+  const slimPx = aggregateRiverSlimPx(active);
+  const mask = slimPx > 0 ? applyRiverSlim(carveMask, rows, cols, slimPx) : carveMask;
+  return { mask, carveMask, classifyMask, overlayW, overlayH };
 }
 
-/** Per-layer paint specs for texture tinting. */
+/** Per-layer paint specs for texture tinting on the 3D island. */
 export async function buildWaterOverlayPaintLayers(waterLayers, texW, texH, rows, cols, threshold = 8) {
   const active = (waterLayers || []).filter((l) => l.kind === 'water' && l.enabled !== false && l.url);
   const layers = [];
@@ -148,7 +245,7 @@ export async function buildWaterOverlayPaintLayers(waterLayers, texW, texH, rows
       id: layer.id,
       mask,
       paintColor: layer.paintColor || DEFAULT_WATER_PAINT_COLOR,
-      paintStrength: Number(layer.paintStrength ?? 0.92),
+      paintStrength: Number(layer.paintStrength ?? 1),
     });
   }
   return layers;
@@ -172,30 +269,36 @@ export function applyWaterOverlayPaintToImageData(
   maskGrid,
   {
     waterRgb = [45, 168, 200],
-    strength = 0.9,
+    strength = 1,
     landOnly = true,
     landGrid = null,
   } = {},
 ) {
   if (!imgData?.data || !maskGrid?.length) return imgData;
   const data = imgData.data;
-  const s = Math.max(0, Math.min(1, Number(strength) || 0.9));
+  const s = Math.max(0, Number(strength) || 1);
   const [wr, wg, wb] = waterRgb;
 
   for (let ty = 0; ty < texH; ty++) {
     for (let tx = 0; tx < texW; tx++) {
       const mi = ty * texW + tx;
-      if (maskGrid[mi] < 32) continue;
+      if (maskGrid[mi] < 4) continue;
       if (landOnly && landGrid && !landGrid[mi]) continue;
       const p = mi * 4;
       if (data[p + 3] < 8) continue;
-      const m = (maskGrid[mi] / 255) * s;
-      data[p] = Math.round(data[p] * (1 - m) + wr * m);
-      data[p + 1] = Math.round(data[p + 1] * (1 - m) + wg * m);
-      data[p + 2] = Math.round(data[p + 2] * (1 - m) + wb * m);
+      const coverage = maskGrid[mi] / 255;
+      const m = clamp01(coverage * s);
+      const effective = 1 - (1 - m) ** (s >= 1 ? 1.15 : 1.6);
+      data[p] = Math.round(data[p] * (1 - effective) + wr * effective);
+      data[p + 1] = Math.round(data[p + 1] * (1 - effective) + wg * effective);
+      data[p + 2] = Math.round(data[p + 2] * (1 - effective) + wb * effective);
     }
   }
   return imgData;
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
 }
 
 export function buildLandGridForTexture(texW, texH, rows, cols, landAtFn) {

@@ -35,10 +35,14 @@ export function getScaledWaterLayerDefaults(worldSettings = {}, mapSizePx = {}) 
   const bankPx = Math.max(4, Math.round(REFERENCE_WATER_LAYER.bankSmoothM / Math.max(1e-6, mpp)));
   return {
     mode: 'visual-only',
-    paintStrength: 0.92,
+    paintStrength: 1,
     paintColor: DEFAULT_WATER_PAINT_COLOR,
-    lakeFlattenEnabled: true,
-    lakeFlattenStrength: 0.55,
+    maskSmoothPx: 3,
+    riverSlimPx: 0,
+    lakeFlattenStrength: 1,
+    riverChannelStrength: 0.65,
+    waterfallCarveStrength: 0.75,
+    lakeCoreErosionCells: 1,
     carveDepthM: round2(REFERENCE_WATER_LAYER.carveDepthM * scale),
     lakeDepthM: round2(REFERENCE_WATER_LAYER.lakeDepthM * scale),
     bankSmoothM: round2(REFERENCE_WATER_LAYER.bankSmoothM * scale),
@@ -48,7 +52,7 @@ export function getScaledWaterLayerDefaults(worldSettings = {}, mapSizePx = {}) 
     lakeMaxDropM: round2(REFERENCE_WATER_LAYER.lakeMaxDropM * scale),
     largeWaterAreaPx: REFERENCE_WATER_LAYER.largeWaterAreaPx,
     maskThreshold: 8,
-    sandBanksEnabled: false,
+    sandBankAmount: 0,
     sandBankWidthM: round2(REFERENCE_WATER_LAYER.sandBankWidthM * scale),
     sandStrength: REFERENCE_WATER_LAYER.sandStrength,
     inheritOceanReflection: true,
@@ -103,7 +107,7 @@ export function buildWaterLayerApiOptions(layer, worldSettings = {}, mapSizePx =
     lakeMaxDropM: Number(merged.lakeMaxDropM ?? defaults.lakeMaxDropM),
     largeWaterAreaPx: Number(merged.largeWaterAreaPx ?? defaults.largeWaterAreaPx),
     maskThreshold: Number(merged.maskThreshold ?? 8),
-    sandBanksEnabled: merged.sandBanksEnabled === true,
+    sandBankAmount: Number(merged.sandBankAmount ?? defaults.sandBankAmount ?? 0),
     sandBankWidthM: Number(merged.sandBankWidthM ?? defaults.sandBankWidthM),
     sandStrength: Number(merged.sandStrength ?? defaults.sandStrength),
     inheritOceanReflection: merged.inheritOceanReflection !== false,
@@ -132,32 +136,60 @@ export function createBlankWaterOverlayDataUrl(mapSizePx = {}) {
   return canvas.toDataURL('image/png');
 }
 
-export function aggregateRiverOverlaySettings(layers = []) {
+/** Sand band width in heightmap cells from 0–1 amount (gentle at low values). */
+export function sandBankPxFromAmount(amount, worldSettings = {}, mapSizePx = {}, heightmapCols = null) {
+  const a = Math.max(0, Math.min(1, Number(amount) || 0));
+  if (a <= 0) return 0;
+  const scale = getWaterLayerHorizonScale(worldSettings);
+  const maxBankM = REFERENCE_WATER_LAYER.sandBankWidthM * scale;
+  const cols = heightmapCols || mapSizePx.width || 1024;
+  const mpp = Number(worldSettings?.widthM || REFERENCE_ISLAND_WIDTH_M) / Math.max(1, cols - 1);
+  const maxBankPx = Math.max(3, Math.round(maxBankM / Math.max(1e-6, mpp)));
+  return Math.max(1, Math.round((a ** 1.35) * maxBankPx));
+}
+
+/** Scale heightmap-cell bank width to terrain texture pixels. */
+export function sandBankTexPxFromAmount(
+  amount,
+  worldSettings = {},
+  mapSizePx = {},
+  heightmapCols = null,
+  texSize = 1024,
+) {
+  const hmPx = sandBankPxFromAmount(amount, worldSettings, mapSizePx, heightmapCols);
+  if (hmPx <= 0) return 0;
+  const cols = heightmapCols || mapSizePx.width || 1024;
+  const scale = Math.max(1, Number(texSize) || 1024) / Math.max(1, cols);
+  const a = Math.max(0, Math.min(1, Number(amount) || 0));
+  return Math.max(2, Math.round(hmPx * scale * (0.85 + a * 0.35)));
+}
+
+export function aggregateRiverOverlaySettings(
+  layers = [],
+  worldSettings = {},
+  mapSizePx = {},
+  heightmapCols = null,
+  texSize = null,
+) {
   const waterLayers = (layers || []).filter((l) => l.kind === 'water' && l.enabled !== false);
   if (!waterLayers.length) {
-    return { sandBanksEnabled: false, inheritOceanReflection: false };
+    return { sandBankAmount: 0, sandBankPx: 0, sandBankTexPx: 0, sandStrength: 0, inheritOceanReflection: false };
   }
+  const sandBankAmount = Math.max(...waterLayers.map((l) => Number(l.sandBankAmount ?? 0)));
+  const sandBankPx = sandBankPxFromAmount(sandBankAmount, worldSettings, mapSizePx, heightmapCols);
+  const sandBankTexPx = texSize
+    ? sandBankTexPxFromAmount(sandBankAmount, worldSettings, mapSizePx, heightmapCols, texSize)
+    : sandBankPx;
   return {
-    sandBanksEnabled: waterLayers.some((l) => l.sandBanksEnabled === true),
-    sandBankWidthM: Math.max(...waterLayers.map((l) => Number(l.sandBankWidthM || 0))),
-    sandStrength: Math.max(...waterLayers.map((l) => Number(l.sandStrength || 0.82))),
+    sandBankAmount,
+    sandBankPx,
+    sandBankTexPx,
+    sandStrength: sandBankAmount > 0 ? clampSandStrength(sandBankAmount) : 0,
     inheritOceanReflection: waterLayers.some((l) => l.inheritOceanReflection !== false),
   };
 }
 
-/** Merged lake-flatten settings from active water layers. */
-export function aggregateLakeFlattenSettings(layers = [], maxHeightM = 500, worldSettings = {}) {
-  const active = (layers || []).filter((l) => l.kind === 'water' && l.enabled !== false && l.url);
-  if (!active.length || !active.some((l) => l.lakeFlattenEnabled !== false)) {
-    return { enabled: false };
-  }
-  const scale = getIslandHorizonScale(worldSettings);
-  const worldMaxH = Math.max(1, Number(maxHeightM || 500) * scale);
-  return {
-    enabled: true,
-    lakeDepthM: Math.max(...active.map((l) => Number(l.lakeDepthM ?? REFERENCE_WATER_LAYER.lakeDepthM * scale))),
-    flattenStrength: Math.max(...active.map((l) => Number(l.lakeFlattenStrength ?? 0.55))),
-    largeWaterAreaPx: Math.min(...active.map((l) => Number(l.largeWaterAreaPx ?? REFERENCE_WATER_LAYER.largeWaterAreaPx))),
-    depthNorm: Math.max(...active.map((l) => Number(l.lakeDepthM ?? REFERENCE_WATER_LAYER.lakeDepthM * scale))) / worldMaxH,
-  };
+function clampSandStrength(amount) {
+  const a = Math.max(0, Math.min(1, Number(amount) || 0));
+  return Math.min(1, 0.42 + a * 0.55);
 }

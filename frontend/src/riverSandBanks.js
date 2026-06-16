@@ -6,16 +6,6 @@ function clamp(v, a, b) {
   return Math.max(a, Math.min(b, v));
 }
 
-function loadImage(url) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
-  });
-}
-
 function dilateMask(data, width, height, radiusPx) {
   if (radiusPx <= 0) return data;
   const out = new Uint8Array(data.length);
@@ -55,34 +45,59 @@ function samplePattern(entry, u, v) {
 }
 
 /**
- * Blend sand into color ImageData near river mask edges.
+ * Blend sand into color ImageData near soft river/lake mask edges.
+ * Works with smoothed masks (not binary).
  */
 export function applyRiverSandBanksToImageData(imgData, maskData, width, height, {
   strength = 0.82,
   bankRadiusPx = 8,
   sampleSand = null,
   wetInnerPx = 2,
+  landThreshold = 36,
 } = {}) {
-  if (!imgData?.data || !maskData?.length) return imgData;
+  if (!imgData?.data || !maskData?.length || bankRadiusPx < 1) return imgData;
+
   const dilated = dilateMask(maskData, width, height, bankRadiusPx);
-  const inner = dilateMask(maskData, width, height, wetInnerPx);
+  const inner = dilateMask(maskData, width, height, Math.max(1, wetInnerPx));
   const data = imgData.data;
   const s = clamp(Number(strength) || 0.82, 0, 1);
+  const landT = Math.max(8, Number(landThreshold) || 36);
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
-      const edge = dilated[idx] > 0 && maskData[idx] === 0;
-      const innerWet = inner[idx] > 0 && maskData[idx] > 0;
-      if (!edge && !innerWet) continue;
+      const m = maskData[idx];
+      const d = dilated[idx];
+      if (d < 6) continue;
+
       const p = idx * 4;
       if (data[p + 3] < 8) continue;
+
       const u = x / Math.max(1, width);
       const v = y / Math.max(1, height);
+
+      // Dry sand on land beside water (soft mask fringe counts as land).
+      const dryEdge = m < landT && d >= landT;
+      // Wet sand on shoreline transition and shallow mask pixels.
+      const wetEdge = m >= landT && m < 200 && inner[idx] > 0;
+
+      if (!dryEdge && !wetEdge) continue;
+
       const sandRgb = sampleSand
-        ? sampleSand(innerWet ? 'wet_sand' : 'sand', u, v)
-        : (innerWet ? [186, 169, 128] : [226, 207, 146]);
-      const t = (edge ? s * 0.92 : s * 0.55) * (dilated[idx] / 255);
+        ? sampleSand(wetEdge ? 'wet_sand' : 'sand', u, v)
+        : (wetEdge ? [186, 169, 128] : [226, 207, 146]);
+
+      let t;
+      if (dryEdge) {
+        const proximity = clamp(d / 255, 0, 1);
+        const distFalloff = clamp(1 - (m / landT) * 0.35, 0.5, 1);
+        t = s * (0.72 + proximity * 0.28) * distFalloff;
+      } else {
+        const shore = clamp(1 - (m - landT) / Math.max(1, 200 - landT), 0, 1);
+        t = s * 0.62 * shore;
+      }
+
+      t = clamp(t, 0, 1);
       data[p] = Math.round(data[p] * (1 - t) + sandRgb[0] * t);
       data[p + 1] = Math.round(data[p + 1] * (1 - t) + sandRgb[1] * t);
       data[p + 2] = Math.round(data[p + 2] * (1 - t) + sandRgb[2] * t);
@@ -105,6 +120,16 @@ export async function loadRiverMaskGrid(maskUrl, targetWidth, targetHeight) {
     grid[i] = raw[i * 4] > 32 ? 255 : 0;
   }
   return grid;
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
 }
 
 export { samplePattern };

@@ -2,7 +2,6 @@ import React from 'react';
 import { Slider } from './studioUi.jsx';
 import { MATERIALS } from './TerrainViewport.jsx';
 import { getMetersPerPixel } from './worldSettings.js';
-import { getWaterLayerSliderLimits } from './waterOverlaySettings.js';
 import { DEFAULT_WATER_PAINT_COLOR } from './riverTexturePaint.js';
 
 /** Shared overlay card for water / structure / marker / texture (not flat sections). */
@@ -18,22 +17,27 @@ export function SceneLayerCard({
   onClear,
   worldSettings = {},
   mapSizePx = {},
+  variant = 'card',
   children,
 }) {
   const mpp = getMetersPerPixel(worldSettings, mapSizePx);
   const isWater = layer.kind === 'water';
-  const waterLimits = getWaterLayerSliderLimits(worldSettings);
+  const flat = variant === 'section';
 
   return (
     <div
-      className={`layer-card ${active ? 'active' : ''} ${!layer.enabled ? 'disabled' : ''}`}
+      className={
+        flat
+          ? `water-layer-section ${active ? 'active' : ''} ${!layer.enabled ? 'disabled' : ''}`
+          : `layer-card ${active ? 'active' : ''} ${!layer.enabled ? 'disabled' : ''}`
+      }
       onClick={() => onSelect(layer.id)}
     >
-      <div className="layer-head">
+      <div className={flat ? 'water-layer-head' : 'layer-head'}>
         <input value={layer.name} onChange={(e) => onChange({ name: e.target.value })} onClick={(e) => e.stopPropagation()} />
         <span className="small muted">{layer.kind}</span>
       </div>
-      <div className="layer-toolbar" onClick={(e) => e.stopPropagation()}>
+      <div className={flat ? 'water-layer-toolbar' : 'layer-toolbar'} onClick={(e) => e.stopPropagation()}>
         <label className="checkline mini">
           <input type="checkbox" checked={layer.enabled !== false} onChange={(e) => onChange({ enabled: e.target.checked })} />
           Visible
@@ -41,13 +45,13 @@ export function SceneLayerCard({
         <button type="button" onClick={onClear}>Clear</button>
         <button type="button" className="danger" onClick={onDelete}>Delete</button>
       </div>
-      <div className="layer-body" onClick={(e) => e.stopPropagation()}>
+      <div className={flat ? 'water-layer-body' : 'layer-body'} onClick={(e) => e.stopPropagation()}>
         <label className="file-small">
           Overlay image
           <input type="file" accept="image/*" onChange={(e) => onFile(e.target.files?.[0])} />
         </label>
         {layer.url && (
-          <div className="thumb-wrap">
+          <div className="thumb-wrap compact-thumb">
             <button
               type="button"
               className="thumb-x"
@@ -56,16 +60,16 @@ export function SceneLayerCard({
             >
               ×
             </button>
-            <img className="layer-thumb" src={layer.url} alt="" />
+            <img className={flat ? 'water-layer-thumb' : 'layer-thumb'} src={layer.url} alt="" />
           </div>
         )}
 
         {isWater && (
           <>
-            {mapSizePx?.width > 0 && (
+            {mapSizePx?.width > 0 && !flat && (
               <p className="small muted">
                 PNG aligned to {mapSizePx.width}×{mapSizePx.height}px
-                {mpp > 0 ? ` · ~${mpp.toFixed(1)} m/px` : ''}. Paint mask strokes anywhere — color is set below, not from the image.
+                {mpp > 0 ? ` · ~${mpp.toFixed(1)} m/px` : ''}. Mask only — shape rivers in Inland shaping below.
               </p>
             )}
             <label className="color-field">
@@ -78,10 +82,10 @@ export function SceneLayerCard({
             </label>
             <Slider
               label="Paint strength"
-              value={layer.paintStrength ?? 0.92}
-              min={0.2}
-              max={1}
-              step={0.02}
+              value={layer.paintStrength ?? 1}
+              min={0.3}
+              max={1.5}
+              step={0.05}
               onChange={(v) => onChange({ paintStrength: v })}
             />
             <Slider
@@ -92,35 +96,6 @@ export function SceneLayerCard({
               step={1}
               onChange={(v) => onChange({ maskThreshold: v })}
             />
-            <label className="checkline mini">
-              <input
-                type="checkbox"
-                checked={layer.lakeFlattenEnabled !== false}
-                onChange={(e) => onChange({ lakeFlattenEnabled: e.target.checked })}
-              />
-              Flatten lake beds on 3D mesh
-            </label>
-            {layer.lakeFlattenEnabled !== false && (
-              <>
-                <Slider
-                  label="Lake flatten amount"
-                  value={layer.lakeFlattenStrength ?? 0.55}
-                  min={0.1}
-                  max={1}
-                  step={0.05}
-                  onChange={(v) => onChange({ lakeFlattenStrength: v })}
-                />
-                <Slider
-                  label="Lake shelf depth"
-                  value={layer.lakeDepthM ?? 0.75}
-                  min={0.1}
-                  max={waterLimits.lakeDepthMax}
-                  step={0.1}
-                  suffix="m"
-                  onChange={(v) => onChange({ lakeDepthM: v })}
-                />
-              </>
-            )}
           </>
         )}
         {layer.kind === 'structure' && (

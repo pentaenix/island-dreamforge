@@ -307,6 +307,28 @@ button.ghost-link:hover { border-color: transparent; transform: none; text-decor
 .compare { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
 .compare img { width: 100%; height: 360px; object-fit: contain; background: #000; border-radius: 14px; border: 1px solid var(--line); }
 .stage3 { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; min-height: 78vh; }
+.sidebar-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(100,217,255,.14); }
+.sidebar-section h3 { margin: 0 0 8px; font-size: 15px; }
+.inland-water-section .inland-water-sliders { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 8px; }
+.inland-water-hint { margin: -2px 0 6px; line-height: 1.35; }
+.inland-water-summary { margin: 8px 0 0; }
+.water-layer-sections { display: flex; flex-direction: column; gap: 0; margin-top: 8px; }
+.water-layer-section {
+  padding: 12px 0;
+  border-top: 1px solid rgba(100,217,255,.1);
+  cursor: pointer;
+}
+.water-layer-section:first-child { border-top: none; padding-top: 4px; }
+.water-layer-section.active .water-layer-head input { color: var(--accent); }
+.water-layer-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.water-layer-head input { font-weight: 700; background: transparent; border: none; padding: 0; }
+.water-layer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.water-layer-toolbar button { padding: 4px 10px; min-height: 32px; font-size: 12px; }
+.water-layer-body label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); margin: 6px 0; font-size: 13px; }
+.water-layer-thumb { width: 100%; max-height: 96px; object-fit: contain; background: #000; border-radius: 8px; border: 1px solid rgba(255,255,255,.08); }
+.compact-thumb { margin: 6px 0; }
+.inland-water-compare { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+.inland-water-compare img { height: auto; max-height: 280px; width: 100%; object-fit: contain; }
 .tools { overflow: auto; max-height: 86vh; }
 .tool-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 10px 0 16px; }
 .material-list { display: grid; gap: 7px; margin-bottom: 12px; }
@@ -353,6 +375,7 @@ button.ghost-link:hover { border-color: transparent; transform: none; text-decor
 .advanced-box { margin-top: 12px; padding: 12px; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; background: rgba(0,0,0,.14); }
 .water-stage { display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); gap: 16px; min-height: 72vh; align-items: start; }
 .water-controls { max-height: 86vh; overflow: auto; }
+.water-controls h3 { margin-top: 18px; margin-bottom: 6px; }
 .water-preview-panel { min-height: 520px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
 .water-preview-panel h2 { align-self: stretch; }
 .water-disc-preview { width: 100%; max-width: 640px; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 12px 0 24px; }
@@ -388,7 +411,10 @@ button.ghost-link:hover { border-color: transparent; transform: none; text-decor
 .water-swatch { width: 28px; height: 18px; border-radius: 4px; border: 1px solid rgba(255,255,255,.2); flex: 1; min-width: 24px; }
 .water-settings-panel details { margin-top: 12px; }
 .water-settings-panel summary { cursor: pointer; color: var(--muted); font-weight: 700; margin-bottom: 8px; }
-@media (max-width: 1100px) { .water-stage { grid-template-columns: 1fr; } .water-controls { max-height: none; } }
+@media (max-width: 1100px) {
+  .water-stage { grid-template-columns: 1fr; }
+  .water-controls { max-height: none; }
+}
 
 .layer-stage { display: grid; grid-template-columns: 430px minmax(0,1fr); gap: 16px; min-height: 78vh; }
 .layer-sidebar { overflow: auto; max-height: 86vh; }
