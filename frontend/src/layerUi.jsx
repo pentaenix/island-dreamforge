@@ -3,6 +3,7 @@ import { Slider } from './studioUi.jsx';
 import { MATERIALS } from './TerrainViewport.jsx';
 import { getMetersPerPixel } from './worldSettings.js';
 import { DEFAULT_WATER_PAINT_COLOR } from './riverTexturePaint.js';
+import { PATH_COLOR_PRESETS } from './detailSettings.js';
 
 /** Shared overlay card for water / structure / marker / texture (not flat sections). */
 export function SceneLayerCard({
@@ -111,10 +112,47 @@ export function SceneLayerCard({
             <Slider label="Object height" value={layer.objectHeightM ?? 8} min={1} max={120} step={1} suffix="m" onChange={(v) => onChange({ objectHeightM: v })} />
           </>
         )}
+        {layer.kind === 'path' && (
+          <>
+            {mapSizePx?.width > 0 && (
+              <p className="small muted">
+                PNG aligned to {mapSizePx.width}×{mapSizePx.height}px
+                {mpp > 0 ? ` · ~${mpp.toFixed(1)} m/px` : ''}. White strokes paint sandy/dirt paths.
+              </p>
+            )}
+            <label>
+              Path color
+              <select value={layer.colorPreset || 'sand'} onChange={(e) => onChange({ colorPreset: e.target.value })}>
+                {Object.keys(PATH_COLOR_PRESETS).map((k) => (
+                  <option key={k} value={k}>{k.replace('_', ' ')}</option>
+                ))}
+              </select>
+            </label>
+            <Slider label="Mask sensitivity" value={layer.maskThreshold ?? 8} min={1} max={64} step={1} onChange={(v) => onChange({ maskThreshold: v })} />
+            <Slider label="Edge softness" value={layer.edgeSoftness ?? 0.55} min={0} max={1} step={0.01} onChange={(v) => onChange({ edgeSoftness: v })} />
+          </>
+        )}
         {layer.kind === 'marker' && (
           <>
-            <label>Marker type<input value={layer.markerType || 'poi'} onChange={(e) => onChange({ markerType: e.target.value })} /></label>
+            <label>
+              Landmark type
+              <select value={layer.markerType || 'poi'} onChange={(e) => onChange({ markerType: e.target.value })}>
+                <option value="poi">POI cone</option>
+                <option value="windmill">Windmill</option>
+                <option value="tower">Tower</option>
+                <option value="flag">Flag</option>
+                <option value="shrine">Shrine</option>
+              </select>
+            </label>
             <label>Name prefix<input value={layer.namePrefix || 'Point'} onChange={(e) => onChange({ namePrefix: e.target.value })} /></label>
+            <Slider label="Marker scale" value={layer.radiusM ?? 4} min={2} max={20} step={0.5} suffix="m" onChange={(v) => onChange({ radiusM: v })} />
+          </>
+        )}
+        {layer.kind === 'dock' && (
+          <>
+            <p className="small muted">Place dock mask near shoreline; analyze to align pier planks.</p>
+            <Slider label="Pier length" value={layer.plankLengthM ?? 8} min={3} max={30} step={0.5} suffix="m" onChange={(v) => onChange({ plankLengthM: v })} />
+            <Slider label="Orientation" value={layer.orientationDeg ?? 0} min={-180} max={180} step={5} suffix="°" onChange={(v) => onChange({ orientationDeg: v })} />
           </>
         )}
         {layer.kind === 'texture' && (

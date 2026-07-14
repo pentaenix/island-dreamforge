@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
 import {
   buildSlopeFieldFromHeights,
   paintProceduralTerrainTexture,
@@ -28,8 +28,20 @@ import {
 } from './riverTexturePaint.js';
 import { applyRiverSandBanksToImageData } from './riverSandBanks.js';
 import { aggregateRiverOverlaySettings } from './waterOverlaySettings.js';
+import {
+  applyPathOverlayPaintToImageData,
+  buildCombinedPathOverlayMask,
+  pathColorRgb,
+} from './pathTexturePaint.js';
+import {
+  applyRockScarsToImageData,
+  buildNoVegetationMasks,
+  isBlockedByMasks,
+  renderDetailObjects,
+} from './detailSceneObjects.js';
 import { exportViewportSceneGlb } from './viewportSceneExport.js';
 import { dataUrlToBlob } from './api.js';
+import { detailSettingsPlacementFingerprint, getPackGlbBlob, getPackGlbFileName } from './modelPackBlobStore.js';
 
 const SKYBOX_CUBE_PATH = '/island-assets/skybox/sky_03_2k/sky_03_cubemap_2k';
 const SKYBOX_MAX_DISTANCE = 12000;
@@ -217,16 +229,26 @@ function isUnderwaterAt(s, r, c, seaNorm) {
   return (s.heights?.[rr * s.cols + cc] || 0) <= seaNorm + 0.003;
 }
 
-function vegetationSettings(s, textureSettings = {}) {
+function vegetationSettings(s, textureSettings = {}, detailSettings = {}) {
   const base = s.viewportConfig?.vegetation || DEFAULT_VIEWPORT_CONFIG.vegetation;
   const ts = textureSettings || {};
+  const canopy = detailSettings?.canopy || {};
+  const canopyEnabled = canopy.enabled === true;
+  const showClumps = canopyEnabled || ts.showForestClumps === true;
   return {
     ...base,
     maxSlopeDeg: ts.forestSlopeFade ?? base.maxSlopeDeg,
-    seed: ts.treeSeed ?? base.seed,
+    seed: canopy.seed ?? ts.treeSeed ?? base.seed,
     minHeightM: ts.treeMinHeightM ?? base.minHeightM,
     wallTreeSlopeStart: ts.wallTreeSlopeStart ?? base.wallTreeSlopeStart,
-    enabled: ts.showForestClumps === true ? base.enabled !== false : false,
+    enabled: showClumps ? base.enabled !== false : false,
+    density: canopyEnabled ? (canopy.canopyDensity ?? base.density) : (ts.treeDensity ?? base.density),
+    maxCount: canopyEnabled ? (canopy.canopyMaxCount ?? base.maxCount) : (ts.treeCountMax ?? base.maxCount),
+    scaleMin: canopyEnabled ? (canopy.canopyScaleMin ?? base.scaleMin) : base.scaleMin,
+    scaleMax: canopyEnabled ? (canopy.canopyScaleMax ?? base.scaleMax) : base.scaleMax,
+    colorVariation: canopy.colorVariation ?? 0,
+    accentClumps: canopy.accentClumps !== false,
+    vegetationClearRadiusM: detailSettings?.paths?.vegetationClearRadiusM ?? 0,
   };
 }
 
@@ -366,6 +388,8 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   brush,
   selectedMaterial,
   textureSettings,
+  detailSettings = {},
+  onModelPackMeta,
   layers = [],
   worldSettings = { widthM: 1480, depthM: 1086, verticalExaggeration: 1 },
   waterDepthUrl = '',
@@ -383,11 +407,15 @@ const TerrainViewport = forwardRef(function TerrainViewport({
 }, ref) {
   const mountRef = useRef(null);
   const hudRef = useRef(null);
+  const detailPlacementKey = useMemo(
+    () => detailSettingsPlacementFingerprint(detailSettings),
+    [detailSettings],
+  );
   const heightUrlRef = useRef(heightUrl);
   heightUrlRef.current = heightUrl;
   const viewportReadyRef = useRef(false);
-  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, layers, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, riverMaskUrl, riverOverlaySettings, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings });
-  propsRef.current = { tool, brush, selectedMaterial, textureSettings, layers, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, riverMaskUrl, riverOverlaySettings, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings };
+  const propsRef = useRef({ tool, brush, selectedMaterial, textureSettings, detailSettings, layers, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, riverMaskUrl, riverOverlaySettings, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings, onModelPackMeta });
+  propsRef.current = { tool, brush, selectedMaterial, textureSettings, detailSettings, layers, seaLevelM, maxHeightM, worldSettings, waterDepthUrl, waterColorUrl, shoreDistanceUrl, shoreDistanceMaxM, foamMaskUrl, waterMaskUrl, riverMaskUrl, riverOverlaySettings, islandMaskUrl, materialPreviewUrl, showSeafloor, oceanSettings, onModelPackMeta };
 
   const stateRef = useRef({
     rows: 0, cols: 0, heights: null, islandMask: null, materialPreview: null,
@@ -400,7 +428,9 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     water: null, waterNormals: null, waterOverlayMaskGrid: null, waterOverlayMaskKey: '',
     waterOverlayPaintLayers: [], heightsSource: null,
     skybox: null, viewportConfig: null, seafloor: null, coastlineSkirt: null,
-    patternTextures: {}, overlayGroup: null, vegetationGroup: null, brushRing: null,
+    patternTextures: {}, overlayGroup: null, vegetationGroup: null, detailGroup: null, brushRing: null,
+    placementManifest: [], modelPackVegetationMask: null,
+    pathOverlayMaskGrid: null, pathOverlayMaskKey: '',
     sceneBounds: null,
     lastPointer: { x: 0, y: 0, hit: false },
   });
@@ -446,6 +476,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       return exportViewportSceneGlb({
         mesh: s.mesh,
         water: s.water,
+        extras: [s.overlayGroup, s.vegetationGroup, s.detailGroup].filter(Boolean),
       });
     },
     async getWaterTextureBlobs() {
@@ -457,7 +488,32 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       return out;
     },
     regenerateTrees() {
-      renderVegetationClumps(stateRef.current);
+      refreshDetailScene(stateRef.current);
+    },
+    refreshDetailDressing() {
+      const s = stateRef.current;
+      if (!s.heights || !s.textureContext) return Promise.resolve(false);
+      return refreshPathOverlayMask(s).then(() => {
+        paintAutoTexture(s, true);
+        return refreshDetailScene(s).then(() => true);
+      });
+    },
+    getPlacementManifest() {
+      return stateRef.current.placementManifest || [];
+    },
+    async getModelPackExportBlobs() {
+      const packs = propsRef.current.detailSettings?.modelPacks || [];
+      const out = [];
+      for (const pack of packs) {
+        const blob = await getPackGlbBlob(pack.id);
+        if (!blob) continue;
+        out.push({
+          packId: pack.id,
+          fileName: pack.glbFileName || getPackGlbFileName(pack.id) || `${pack.id}.glb`,
+          blob,
+        });
+      }
+      return out;
     },
     resetCamera() {
       frameCinematicCamera(stateRef.current, propsRef.current);
@@ -649,14 +705,17 @@ const TerrainViewport = forwardRef(function TerrainViewport({
   useEffect(() => {
     const s = stateRef.current;
     if (!s.heights || !s.textureContext) return;
-    refreshWaterOverlayMask(s).then(() => paintAutoTexture(s, true));
+    refreshWaterOverlayMask(s).then(() => refreshPathOverlayMask(s)).then(() => {
+      paintAutoTexture(s, true);
+      refreshDetailScene(s);
+    });
   }, [layers, heightUrl]);
   useEffect(() => {
     const s = stateRef.current;
     if (!s.heights || !s.textureContext) return;
-    refreshWaterOverlayMask(s).then(() => {
+    refreshWaterOverlayMask(s).then(() => refreshPathOverlayMask(s)).then(() => {
       paintAutoTexture(s, true);
-      renderVegetationClumps(s);
+      refreshDetailScene(s);
       const st = propsRef.current.textureSettings || {};
       if (s.dioramaLights) {
         applyDioramaLighting(s.dioramaLights, dioramaLightingFromSettings(st), {
@@ -667,6 +726,12 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       }
     });
   }, [textureSettings]);
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.scene || !s.heights) return;
+    const timer = setTimeout(() => refreshDetailScene(s), 450);
+    return () => clearTimeout(timer);
+  }, [detailPlacementKey, maxHeightM]);
   useEffect(() => {
     const s = stateRef.current;
     if (!s.scene || !s.heights) return;
@@ -762,6 +827,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     ]);
 
     s.rows = rows; s.cols = cols; s.heights = heights; s.heightsSource = Float32Array.from(heights);
+    s.coastDistanceField = null;
     s.islandMask = islandMask; s.materialPreview = materialPreview;
     const texSize = clamp(Number(propsRef.current.textureSettings?.textureSize || 1024), 512, 8192);
     const textureCanvas = document.createElement('canvas'); textureCanvas.width = texSize; textureCanvas.height = texSize;
@@ -843,7 +909,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       propsRef.current.maxHeightM,
     );
     renderOverlayObjects(s, layers || []);
-    renderVegetationClumps(s);
+    await refreshDetailScene(s);
     if (s.controls && s.camera) {
       frameCinematicCamera(s, propsRef.current);
     }
@@ -1112,6 +1178,30 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       }
     }
 
+    const detailCfg = propsRef.current.detailSettings || {};
+    if (detailCfg.paths?.enabled !== false && s.pathOverlayMaskGrid?.length) {
+      const pathRgb = pathColorRgb(null, detailCfg.paths);
+      applyPathOverlayPaintToImageData(img, size, size, s.pathOverlayMaskGrid, {
+        pathRgb,
+        strength: 1,
+        edgeSoftness: detailCfg.paths?.edgeSoftness ?? 0.55,
+        seed: detailCfg.beachPalms?.seed ?? 42,
+        riverMask: null,
+      });
+    }
+
+    if (detailCfg.rockScars?.enabled === true) {
+      applyRockScarsToImageData(img, size, size, {
+        heights: s.heights,
+        rows: s.rows,
+        cols: s.cols,
+        maxH,
+        world,
+        seaLevelM: Number(propsRef.current.seaLevelM || 0),
+        detailSettings: detailCfg,
+      });
+    }
+
     if (s.waterOverlayPaintLayers?.length && s.waterOverlayMaskPixelCount > 0) {
       for (const pl of s.waterOverlayPaintLayers) {
         if (countMaskPixels(pl.mask) === 0) continue;
@@ -1155,6 +1245,43 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     if (s.normalTexture) s.normalTexture.needsUpdate = true;
   }
 
+  async function refreshPathOverlayMask(s) {
+    const layers = propsRef.current.layers || [];
+    const pathSettings = propsRef.current.detailSettings?.paths || {};
+    const size = s.textureCanvas?.width;
+    if (!s.textureCanvas || !s.rows || !size) {
+      s.pathOverlayMaskGrid = null;
+      s.pathOverlayMaskKey = '';
+      s.noVegetationMasks = buildNoVegetationMasks(null, s.waterOverlayMaskGrid, layers, size || 1, size || 1, s.rows, s.cols);
+      return;
+    }
+    const key = JSON.stringify({
+      tex: size,
+      layers: layers
+        .filter((l) => l.kind === 'path')
+        .map((l) => ({ id: l.id, url: l.url, enabled: l.enabled, maskThreshold: l.maskThreshold, colorPreset: l.colorPreset })),
+      pathSettings,
+    });
+    if (pathSettings.enabled !== false) {
+      if (s.pathOverlayMaskKey !== key || !s.pathOverlayMaskGrid) {
+        s.pathOverlayMaskKey = key;
+        s.pathOverlayMaskGrid = await buildCombinedPathOverlayMask(layers, size, size, pathSettings);
+      }
+    } else {
+      s.pathOverlayMaskGrid = null;
+      s.pathOverlayMaskKey = key;
+    }
+    s.noVegetationMasks = buildNoVegetationMasks(
+      s.pathOverlayMaskGrid,
+      s.waterOverlayMaskGrid,
+      layers,
+      size,
+      size,
+      s.rows,
+      s.cols,
+    );
+  }
+
   async function refreshWaterOverlayMask(s) {
     const layers = propsRef.current.layers || [];
     if (!s.textureCanvas || !s.rows) {
@@ -1191,6 +1318,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     if (s.waterOverlayMaskPixelCount === 0 && layers.some((l) => l.kind === 'water' && l.enabled !== false && l.url)) {
       console.warn('[rivers] Overlay loaded but no painted pixels matched — use opaque strokes or lower mask sensitivity.');
     }
+    await refreshPathOverlayMask(s);
   }
 
   async function makeWaterPlane(seaLevel, world = {}, rows = 64, cols = 64) {
@@ -1412,7 +1540,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     }
     s.geometry.attributes.position.needsUpdate = true;
     s.geometry.computeVertexNormals();
-    renderVegetationClumps(s);
+    refreshDetailScene(s);
   }
   function terrainHeightAtWorld(s, x, z) {
     if (!s.heights || !s.rows || !s.cols) return 0;
@@ -1424,6 +1552,19 @@ const TerrainViewport = forwardRef(function TerrainViewport({
       Number(propsRef.current.maxHeightM || 500),
       propsRef.current.worldSettings || {},
     );
+  }
+
+  async function refreshDetailScene(s) {
+    await renderDetailObjects(s, propsRef.current, {
+      onMetaUpdate: (metaUpdates) => {
+        const cb = propsRef.current.onModelPackMeta;
+        if (!cb || !metaUpdates) return;
+        Object.entries(metaUpdates).forEach(([packId, variantMeta]) => {
+          cb(packId, variantMeta);
+        });
+      },
+    });
+    renderVegetationClumps(s);
   }
 
   function renderVegetationClumps(s) {
@@ -1438,7 +1579,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
         }
       });
     }
-    const settings = vegetationSettings(s, propsRef.current.textureSettings || {});
+    const settings = vegetationSettings(s, propsRef.current.textureSettings || {}, propsRef.current.detailSettings || {});
     if (settings.enabled === false) return;
     const density = clamp(Number(settings.treeDensity ?? settings.density ?? 0.58), 0, 1);
     if (density <= 0.02) return;
@@ -1456,6 +1597,16 @@ const TerrainViewport = forwardRef(function TerrainViewport({
     const scaleMin = Number(settings.scaleMin ?? 3.5) * featureScale;
     const scaleMax = Number(settings.scaleMax ?? 14) * featureScale;
     const carpetLayers = Math.max(1, Math.round(Number(settings.carpetLayers ?? 2)));
+    const colorVar = Number(settings.colorVariation ?? 0);
+    const useAccent = settings.accentClumps !== false;
+    const masks = {
+      waterMask: s.waterOverlayMaskGrid,
+      pathMask: s.pathOverlayMaskGrid,
+      structureMask: s.noVegetationMasks?.structureMask,
+      dockMask: s.noVegetationMasks?.dockMask,
+      riverMask: s.waterOverlayMaskGrid,
+      modelPackMask: s.modelPackVegetationMask,
+    };
     const { width, depth } = getWorldDims(s.rows, s.cols, propsRef.current.worldSettings || {});
     const group = new THREE.Group();
     group.name = 'Procedural distant forest clumps';
@@ -1487,6 +1638,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
           const h = heightAt(s, r, c);
           const slope = slopeAt(s, r, c);
           if (h < minNorm || elevationMetersFromNormalized(h, maxH, world) < minHm || slope > maxSlope) continue;
+          if (isBlockedByMasks(r, c, s.rows, s.cols, masks)) continue;
           const n = fbm(r / 2.8 + layer * 17, c / 2.8 + layer * 11, seed + layer * 31);
           const slopePenalty = 1 - smoothstep(wallSlopeStart, maxSlope, slope) * 0.52;
           const localDensity = density * slopePenalty;
@@ -1505,7 +1657,7 @@ const TerrainViewport = forwardRef(function TerrainViewport({
           dummy.updateMatrix();
           canopyMatrices.push(dummy.matrix.clone());
           placed += 1;
-          if (n < 0.5 && placed < maxCount) {
+          if (useAccent && n < 0.5 + colorVar * 0.2 && placed < maxCount) {
             dummy.position.set(x + canopyScale * 0.15, y + canopyScale * 0.62, z + canopyScale * 0.1);
             dummy.rotation.set(0, hashNoise(r, c, seed + 39) * Math.PI * 2, 0);
             dummy.scale.set(canopyScale * 0.5, canopyScale * 0.62, canopyScale * 0.48);
@@ -1556,7 +1708,19 @@ const TerrainViewport = forwardRef(function TerrainViewport({
           mesh.castShadow = true; mesh.receiveShadow = true;
         } else if (layer.kind === 'marker') {
           const radius = Number(f.radiusM || layer.radiusM || 4);
-          mesh = new THREE.Mesh(new THREE.ConeGeometry(radius, radius * 3.0, 20), markerMat); mesh.position.set(x, y + radius * 1.6, z);
+          const mtype = f.markerType || layer.markerType || 'poi';
+          if (mtype === 'poi') {
+            mesh = new THREE.Mesh(new THREE.ConeGeometry(radius, radius * 3.0, 20), markerMat);
+            mesh.position.set(x, y + radius * 1.6, z);
+          }
+        } else if (layer.kind === 'dock') {
+          const plankW = Number(layer.plankWidthM ?? 2.2);
+          const plankL = Number(layer.plankLengthM ?? 8);
+          const plankH = 1.2;
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x9a7b55, roughness: 0.9 });
+          mesh = new THREE.Mesh(new THREE.BoxGeometry(plankW, plankH, plankL), woodMat);
+          mesh.position.set(x, y + plankH * 0.5, z);
+          mesh.rotation.y = -THREE.MathUtils.degToRad(Number(f.orientationDeg || layer.orientationDeg || 0));
         } else if (layer.kind === 'water' && (f.waterFeature === 'waterfall' || f.waterFeature === 'fast-river')) {
           const radius = f.waterFeature === 'waterfall' ? 5 : 3, hh = f.waterFeature === 'waterfall' ? Math.max(16, Number(f.heightDropM || 16)) : 10;
           mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, hh, 18), waterMat); mesh.position.set(x, y + hh * 0.5, z);

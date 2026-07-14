@@ -417,6 +417,9 @@ async def export_project(
     preview_scene: Optional[UploadFile] = File(None),
     ocean_bands: Optional[UploadFile] = File(None),
     ocean_foam: Optional[UploadFile] = File(None),
+    detail_placement_manifest: str = Form("{}"),
+    detail_settings: str = Form("{}"),
+    detail_model_glb: List[UploadFile] = File(default=[]),
     recipe: str = Form("{}"),
     options: str = Form("{}"),
 ) -> StreamingResponse:
@@ -431,6 +434,9 @@ async def export_project(
         preview_glb = await preview_scene.read() if preview_scene else None
         bands_png = await ocean_bands.read() if ocean_bands else None
         foam_png = await ocean_foam.read() if ocean_foam else None
+        detail_manifest = _json_field(detail_placement_manifest, {})
+        detail_cfg = _json_field(detail_settings, {})
+        model_pack_uploads = detail_model_glb or []
         h_img = read_upload_image(height_bytes, "I;16")
         height = image_to_height_m(h_img, max_height_m)
         tex_img = read_upload_image(tex_bytes, "RGB") if tex_bytes else None
@@ -479,7 +485,12 @@ async def export_project(
                 manifest["files"]["oceanBands"] = "textures/ocean_bands.png"
             if foam_png:
                 manifest["files"]["oceanFoam"] = "textures/ocean_foam.png"
-            zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+            if detail_cfg:
+                manifest["files"]["detailSettings"] = "details/detail_settings.json"
+            if detail_manifest:
+                manifest["files"]["placementManifest"] = "details/placement_manifest.json"
+            if model_pack_uploads:
+                manifest["files"]["modelPacks"] = []
             zf.writestr("maps/final_heightmap_16bit.png", height_bytes)
             if tex_bytes:
                 zf.writestr("maps/painted_texture.png", tex_bytes)
@@ -491,11 +502,22 @@ async def export_project(
                 zf.writestr("textures/ocean_bands.png", bands_png)
             if foam_png:
                 zf.writestr("textures/ocean_foam.png", foam_png)
+            if detail_cfg:
+                zf.writestr("details/detail_settings.json", json.dumps(detail_cfg, indent=2))
+            if detail_manifest:
+                zf.writestr("details/placement_manifest.json", json.dumps(detail_manifest, indent=2))
+            for i, pack_file in enumerate(model_pack_uploads):
+                pack_bytes = await pack_file.read()
+                pack_name = pack_file.filename or f"model_pack_{i}.glb"
+                pack_path = f"details/model_packs/{pack_name}"
+                zf.writestr(pack_path, pack_bytes)
+                manifest["files"]["modelPacks"].append(pack_path)
             zf.writestr(manifest["files"]["glb"], glb)
             zf.writestr("models/island_terrain.obj", obj)
             zf.writestr("models/island_terrain.stl", stl)
             zf.writestr("project_recipe.json", json.dumps(_json_field(recipe, {}), indent=2))
             zf.writestr("export_options.json", json.dumps(opts, indent=2))
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
         buffer.seek(0)
         return StreamingResponse(
             buffer,
